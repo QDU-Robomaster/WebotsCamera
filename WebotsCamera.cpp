@@ -103,8 +103,8 @@ WebotsCamera::WebotsCamera(LibXR::HardwareContainer& hw, LibXR::ApplicationManag
 
         eulr = LibXR::EulerAngle<float>(-eulr.Pitch(), eulr.Yaw(), eulr.Roll());
 
-        XR_LOG_PASS("WebotsCamera: camera eulr: %.3f, %.3f, %.3f", eulr.Roll(),
-                    eulr.Pitch(), eulr.Yaw());
+        XR_LOG_DEBUG("WebotsCamera: camera eulr: %.3f, %.3f, %.3f", eulr.Roll(),
+                     eulr.Pitch(), eulr.Yaw());
 
         quat_f = eulr.ToQuaternion();
 

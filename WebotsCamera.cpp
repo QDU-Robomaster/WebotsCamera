@@ -4,6 +4,9 @@
 #include <opencv2/imgproc.hpp>
 
 #include "logger.hpp"
+#include "timer.hpp"
+#include "transform.hpp"
+#include "webots/Supervisor.hpp"
 
 // === 工具函数 ===============================================================
 int WebotsCamera::FpsToPeriodMS(int fps, int fallback_ms)
@@ -68,6 +71,49 @@ WebotsCamera::WebotsCamera(LibXR::HardwareContainer& hw, LibXR::ApplicationManag
 
   XR_LOG_PASS("Webots camera enabled: name=%s, period=%d ms, world_dt=%d ms",
               runtime_.device_name.c_str(), sample_period_ms_, time_step_ms_);
+
+  supervisor_ = hw.FindOrExit<webots::Supervisor>({"supervisor"});
+
+  auto timer_handle = LibXR::Timer::CreateTask<WebotsCamera*>(
+      [](WebotsCamera* self)
+      {
+        if (self->cam_node_ == nullptr)
+        {
+          self->cam_node_ = self->supervisor_->getFromDef("camera");
+          return;
+        }
+
+        static const LibXR::RotationMatrix<double> COMPENSATION =
+            LibXR::RotationMatrix<double>(0, 1, 0, 1, 0, 0, 0, 0, -1);
+
+        const double* r9_cam = self->cam_node_->getOrientation();
+        LibXR::RotationMatrix<double> r_final =
+            LibXR::RotationMatrix<double>(r9_cam[0], r9_cam[1], r9_cam[2], r9_cam[3],
+                                          r9_cam[4], r9_cam[5], r9_cam[6], r9_cam[7],
+                                          r9_cam[8]) *
+            COMPENSATION;
+
+        LibXR::Quaternion<double> quat = r_final;
+
+        LibXR::Quaternion<float> quat_f(
+            static_cast<float>(quat.x()), static_cast<float>(quat.y()),
+            static_cast<float>(quat.z()), static_cast<float>(quat.w()));
+
+        LibXR::EulerAngle<float> eulr = quat_f.ToEulerAngle();
+
+        eulr = LibXR::EulerAngle<float>(-eulr.Pitch(), eulr.Yaw(), eulr.Roll());
+
+        XR_LOG_PASS("WebotsCamera: camera eulr: %.3f, %.3f, %.3f", eulr.Roll(),
+                    eulr.Pitch(), eulr.Yaw());
+
+        quat_f = eulr.ToQuaternion();
+
+        self->gimbal_rotation_topic_.Publish(quat_f);
+      },
+      this, 1);
+
+  LibXR::Timer::Add(timer_handle);
+  LibXR::Timer::Start(timer_handle);
 
   app.Register(*this);
 }

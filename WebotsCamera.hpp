@@ -43,7 +43,9 @@ depends:
 
 // Webots
 #include <webots/Camera.hpp>
+#include <webots/Node.hpp>
 #include <webots/Robot.hpp>
+#include <webots/Supervisor.hpp>
 
 class WebotsCamera : public LibXR::Application, public CameraBase
 {
@@ -91,10 +93,14 @@ class WebotsCamera : public LibXR::Application, public CameraBase
   // Topics（与其它相机保持一致的名字/类型）
   LibXR::Topic frame_topic_ = LibXR::Topic("image_raw", sizeof(cv::Mat));
   LibXR::Topic info_topic_ = LibXR::Topic("camera_info", sizeof(CameraBase::CameraInfo));
+  LibXR::Topic gimbal_rotation_topic_ =
+      LibXR::Topic::FindOrCreate<LibXR::Quaternion<float>>("rotation");
 
   // Webots 设备
   webots::Robot* robot_{};
   webots::Camera* cam_ = nullptr;
+  webots::Node* cam_node_ = nullptr;
+  webots::Supervisor* supervisor_ = nullptr;
   int time_step_ms_ = 0;       // 世界 basicTimeStep（ms）
   int sample_period_ms_ = 33;  // Camera enable 周期 ~ 1000/fps
 

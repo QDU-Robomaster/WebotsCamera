@@ -6,31 +6,40 @@
 #include "logger.hpp"
 
 // === 工具函数 ===============================================================
-int WebotsCamera::fps_to_period_ms(int fps, int fallback_ms)
+int WebotsCamera::FpsToPeriodMS(int fps, int fallback_ms)
 {
-  if (fps <= 0) return fallback_ms;
-  const double p = 1000.0 / static_cast<double>(fps);
-  int ms = static_cast<int>(p + 0.5);
+  if (fps <= 0)
+  {
+    return fallback_ms;
+  }
+  const double P = 1000.0 / static_cast<double>(fps);
+  int ms = static_cast<int>(std::lround(P));
   return ms < 1 ? 1 : ms;
 }
 
 // === 构造 / 析构 ============================================================
 WebotsCamera::WebotsCamera(LibXR::HardwareContainer& hw, LibXR::ApplicationManager& app,
-                           const CameraBase::CameraInfo info, const RuntimeParam runtime)
+                           CameraBase::CameraInfo info, RuntimeParam runtime)
     // 注意：必须显式构造 CameraBase，让 RamFS 命令入口挂载成功
-    : CameraBase(hw, runtime.device_name.c_str()), info_(info), runtime_(runtime)
+    : CameraBase(hw, runtime.device_name.c_str()),
+      info_(info),
+      runtime_(runtime),
+      robot_(_libxr_webots_robot_handle)
 {
   XR_LOG_INFO("Starting WebotsCamera!");
 
   // 1) 获取 Robot 句柄 & basicTimeStep
-  robot_ = _libxr_webots_robot_handle;
+
   if (!robot_)
   {
     XR_LOG_ERROR("Webots robot handle is null!");
     exit(-1);
   }
   time_step_ms_ = static_cast<int>(robot_->getBasicTimeStep());
-  if (time_step_ms_ <= 0) time_step_ms_ = 16;  // 容错
+  if (time_step_ms_ <= 0)
+  {
+    time_step_ms_ = 16;  // 容错
+  }
 
   // 2) 获取 Camera 设备
   cam_ = robot_->getCamera(runtime_.device_name);
@@ -44,7 +53,7 @@ WebotsCamera::WebotsCamera(LibXR::HardwareContainer& hw, LibXR::ApplicationManag
   frame_buf_ = std::make_unique<std::array<uint8_t, BUF_BYTES>>();
 
   // 4) 启用相机（以 fps 近似设置采样周期）
-  sample_period_ms_ = fps_to_period_ms(runtime_.fps, 33);
+  sample_period_ms_ = FpsToPeriodMS(runtime_.fps, 33);
   cam_->enable(sample_period_ms_);
 
   // 5) 初始曝光（若 runtime_ 有传入）
@@ -85,13 +94,16 @@ void WebotsCamera::SetRuntimeParam(const RuntimeParam& p)
 
 void WebotsCamera::UpdateParameters()
 {
-  if (!cam_) return;
+  if (!cam_)
+  {
+    return;
+  }
 
   // 1) 更新 fps -> enable 周期
-  const int new_period = fps_to_period_ms(runtime_.fps, sample_period_ms_);
-  if (new_period != sample_period_ms_)
+  const int NEW_PERIOD = FpsToPeriodMS(runtime_.fps, sample_period_ms_);
+  if (NEW_PERIOD != sample_period_ms_)
   {
-    sample_period_ms_ = new_period;
+    sample_period_ms_ = NEW_PERIOD;
     cam_->disable();
     cam_->enable(sample_period_ms_);
     XR_LOG_INFO("WebotsCamera: fps target=%d -> period=%d ms", runtime_.fps,
@@ -140,11 +152,17 @@ void WebotsCamera::ThreadFun(WebotsCamera* self)
   XR_LOG_INFO("Publishing image!");
 
   // 使相机至少“热身”一帧
-  if (self->robot_) self->robot_->step(self->time_step_ms_);
+  if (self->robot_)
+  {
+    self->robot_->step(self->time_step_ms_);
+  }
 
   while (self->running_.load())
   {
-    if (!self->robot_ || !self->cam_) break;
+    if (!self->robot_ || !self->cam_)
+    {
+      break;
+    }
 
     // 推进仿真：注意这是“仿真时间步长”，而非采样周期
     int rc = self->robot_->step(self->time_step_ms_);

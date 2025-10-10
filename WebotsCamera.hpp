@@ -38,7 +38,6 @@ depends:
 #include "CameraBase.hpp"
 #include "app_framework.hpp"
 #include "libxr.hpp"
-#include "logger.hpp"
 #include "message.hpp"
 #include "thread.hpp"
 
@@ -65,7 +64,7 @@ class WebotsCamera : public LibXR::Application, public CameraBase
  public:
   // 与 Hik/Uvc 保持一致的构造签名
   explicit WebotsCamera(LibXR::HardwareContainer& hw, LibXR::ApplicationManager& app,
-                        const CameraBase::CameraInfo info, const RuntimeParam runtime);
+                        CameraBase::CameraInfo info, RuntimeParam runtime);
 
   ~WebotsCamera();
 
@@ -79,7 +78,7 @@ class WebotsCamera : public LibXR::Application, public CameraBase
  private:
   void UpdateParameters();
   static void ThreadFun(WebotsCamera* self);
-  static int fps_to_period_ms(int fps, int fallback_ms);
+  static int FpsToPeriodMS(int fps, int fallback_ms);
 
  private:
   // 大 RGB 缓冲（匹配其它相机模块风格）

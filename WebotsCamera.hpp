@@ -32,7 +32,6 @@ depends:
 #include <atomic>
 #include <memory>
 #include <opencv2/core/mat.hpp>
-#include <string>
 
 // LibXR
 #include "CameraBase.hpp"
@@ -57,7 +56,7 @@ class WebotsCamera : public LibXR::Application, public CameraBase
 
   struct RuntimeParam
   {
-    std::string device_name = "camera";
+    const char* device_name = "camera";
     int fps = 30;  // 采样周期 = round(1000/fps) ms（Webots 按毫秒周期采样）
     double exposure = 1.0;  // Webots 相机曝光比例（下一帧生效）
     double gain = 0.0;      // 占位：Webots 无原生增益（仅记录）

@@ -3,7 +3,9 @@
 #include <cstdlib>
 #include <opencv2/imgproc.hpp>
 
+#include "libxr_system.hpp"
 #include "logger.hpp"
+#include "thread.hpp"
 #include "timer.hpp"
 #include "transform.hpp"
 #include "webots/Supervisor.hpp"
@@ -24,7 +26,7 @@ int WebotsCamera::FpsToPeriodMS(int fps, int fallback_ms)
 WebotsCamera::WebotsCamera(LibXR::HardwareContainer& hw, LibXR::ApplicationManager& app,
                            CameraBase::CameraInfo info, RuntimeParam runtime)
     // 注意：必须显式构造 CameraBase，让 RamFS 命令入口挂载成功
-    : CameraBase(hw, runtime.device_name.c_str()),
+    : CameraBase(hw, runtime.device_name),
       info_(info),
       runtime_(runtime),
       robot_(_libxr_webots_robot_handle)
@@ -48,7 +50,7 @@ WebotsCamera::WebotsCamera(LibXR::HardwareContainer& hw, LibXR::ApplicationManag
   cam_ = robot_->getCamera(runtime_.device_name);
   if (!cam_)
   {
-    XR_LOG_ERROR("Webots Camera '%s' not found!", runtime_.device_name.c_str());
+    XR_LOG_ERROR("Webots Camera '%s' not found!", runtime_.device_name);
     throw std::runtime_error("WebotsCamera: camera device not found");
   }
 
@@ -70,7 +72,7 @@ WebotsCamera::WebotsCamera(LibXR::HardwareContainer& hw, LibXR::ApplicationManag
                          LibXR::Thread::Priority::REALTIME);
 
   XR_LOG_PASS("Webots camera enabled: name=%s, period=%d ms, world_dt=%d ms",
-              runtime_.device_name.c_str(), sample_period_ms_, time_step_ms_);
+              runtime_.device_name, sample_period_ms_, time_step_ms_);
 
   supervisor_ = hw.FindOrExit<webots::Supervisor>({"supervisor"});
 
@@ -197,12 +199,6 @@ void WebotsCamera::ThreadFun(WebotsCamera* self)
 {
   XR_LOG_INFO("Publishing image!");
 
-  // 使相机至少“热身”一帧
-  if (self->robot_)
-  {
-    self->robot_->step(self->time_step_ms_);
-  }
-
   while (self->running_.load())
   {
     if (!self->robot_ || !self->cam_)
@@ -210,13 +206,7 @@ void WebotsCamera::ThreadFun(WebotsCamera* self)
       break;
     }
 
-    // 推进仿真：注意这是“仿真时间步长”，而非采样周期
-    int rc = self->robot_->step(self->time_step_ms_);
-    if (rc == -1)
-    {
-      XR_LOG_WARN("Webots simulation ended.");
-      break;
-    }
+    LibXR::Thread::Sleep(_libxr_webots_robot_handle->getBasicTimeStep());
 
     // 取图：Webots 提供的图像是 BGRA（8UC4），指针在下一次 step 前有效
     const unsigned char* rgba = self->cam_->getImage();

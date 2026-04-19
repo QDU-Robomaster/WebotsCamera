@@ -2,14 +2,14 @@
 
 // clang-format off
 /* === MODULE MANIFEST V2 ===
-module_description: Webots simulated camera publisher (RGB8)
+module_description: Webots simulated camera publisher (BGR8)
 constructor_args:
   - info:
       width: 1280
       height: 720
       step: 3840
       timestamp: 0
-      encoding: CameraBase::Encoding::RGB8
+      encoding: CameraBase::Encoding::BGR8
       camera_matrix: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
       distortion_model: CameraBase::DistortionModel::PLUMB_BOB
       distortion_coefficients: [0.0, 0.0, 0.0, 0.0, 0.0]
@@ -29,6 +29,7 @@ depends:
 
 // STL / OpenCV
 #include <array>
+#include <cstdint>
 #include <atomic>
 #include <memory>
 #include <opencv2/core/mat.hpp>
@@ -51,7 +52,7 @@ class WebotsCamera : public LibXR::Application, public CameraBase
  public:
   static constexpr int MAX_W = 4096;
   static constexpr int MAX_H = 3072;
-  static constexpr int CH = 3;  // RGB8
+  static constexpr int CH = 3;  // BGR8
   static constexpr size_t BUF_BYTES = static_cast<size_t>(MAX_W) * MAX_H * CH;
 
   struct RuntimeParam
@@ -80,9 +81,10 @@ class WebotsCamera : public LibXR::Application, public CameraBase
   void UpdateParameters();
   static void ThreadFun(WebotsCamera* self);
   static int FpsToPeriodMS(int fps, int fallback_ms);
+  CameraBase::PoseStamped ReadCameraPoseStamped(LibXR::MicrosecondTimestamp timestamp) const;
 
  private:
-  // 大 RGB 缓冲（匹配其它相机模块风格）
+  // 大 BGR 缓冲（匹配其它相机模块风格）
   std::unique_ptr<std::array<uint8_t, BUF_BYTES>> frame_buf_{};
 
   // 参数
@@ -92,6 +94,8 @@ class WebotsCamera : public LibXR::Application, public CameraBase
   // Topics（与其它相机保持一致的名字/类型）
   LibXR::Topic frame_topic_ = LibXR::Topic("image_raw", sizeof(cv::Mat));
   LibXR::Topic info_topic_ = LibXR::Topic("camera_info", sizeof(CameraBase::CameraInfo));
+  LibXR::Topic camera_pose_topic_ =
+      LibXR::Topic("camera_pose", sizeof(CameraBase::PoseStamped));
   LibXR::Topic gimbal_rotation_topic_ =
       LibXR::Topic::FindOrCreate<LibXR::Quaternion<float>>("rotation");
 
@@ -102,11 +106,13 @@ class WebotsCamera : public LibXR::Application, public CameraBase
   webots::Supervisor* supervisor_ = nullptr;
   int time_step_ms_ = 0;       // 世界 basicTimeStep（ms）
   int sample_period_ms_ = 33;  // Camera enable 周期 ~ 1000/fps
+  int publish_interval_steps_ = 1;
 
   // 线程 / 状态
   std::atomic<bool> running_{false};
   LibXR::Thread capture_thread_{};
   int fail_count_ = 0;
+  uint64_t last_publish_bucket_ = UINT64_MAX;
 };
 
 // 由宿主环境提供的 Webots Robot 指针（与现有代码保持一致）

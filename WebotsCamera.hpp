@@ -4,116 +4,112 @@
 /* === MODULE MANIFEST V2 ===
 module_description: Webots simulated camera publisher (BGR8)
 constructor_args:
-  - info:
+  - runtime:
+      device_name: "camera"   # Webots 场景树中的 Camera 名称
+      fps: 30                 # 期望帧率（通过 enable 周期近似）
+      exposure: 1.0           # Webots 相机曝光比例（>1 更亮，<1 更暗）
+      gain: 0.0               # 保留字段：Webots 无原生增益，记录+告警
+template_args:
+  - Info:
       width: 1280
       height: 720
       step: 3840
-      timestamp: 0
       encoding: CameraBase::Encoding::BGR8
       camera_matrix: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
       distortion_model: CameraBase::DistortionModel::PLUMB_BOB
       distortion_coefficients: [0.0, 0.0, 0.0, 0.0, 0.0]
       rectification_matrix: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
       projection_matrix: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-  - runtime:
-      device_name: "camera"   # Webots 场景树中的 Camera 名称
-      fps: 30                 # 期望帧率（通过 enable 周期近似）
-      exposure: 1.0           # Webots 相机曝光比例（>1 更亮，<1 更暗）
-      gain: 0.0               # 保留字段：Webots 无原生增益，记录+告警
-template_args: []
 required_hardware: []
 depends:
   - qdu-future/CameraBase
 === END MANIFEST === */
 // clang-format on
 
-// STL / OpenCV
 #include <array>
-#include <cstdint>
 #include <atomic>
+#include <cstdint>
 #include <memory>
+
 #include <opencv2/core/mat.hpp>
 
-// LibXR
 #include "CameraBase.hpp"
 #include "app_framework.hpp"
 #include "libxr.hpp"
 #include "message.hpp"
 #include "thread.hpp"
 
-// Webots
 #include <webots/Camera.hpp>
 #include <webots/Node.hpp>
 #include <webots/Robot.hpp>
 #include <webots/Supervisor.hpp>
 
+template <CameraBase::StaticInfo StaticInfoV>
 class WebotsCamera : public LibXR::Application, public CameraBase
 {
  public:
+  static inline constexpr CameraBase::StaticInfo kStaticInfo = StaticInfoV;
   static constexpr int MAX_W = 4096;
   static constexpr int MAX_H = 3072;
-  static constexpr int CH = 3;  // BGR8
+  static constexpr int CH = 3;
   static constexpr size_t BUF_BYTES = static_cast<size_t>(MAX_W) * MAX_H * CH;
 
   struct RuntimeParam
   {
     const char* device_name = "camera";
-    int fps = 30;  // 采样周期 = round(1000/fps) ms（Webots 按毫秒周期采样）
-    double exposure = 1.0;  // Webots 相机曝光比例（下一帧生效）
-    double gain = 0.0;      // 占位：Webots 无原生增益（仅记录）
+    int fps = 30;
+    double exposure = 1.0;
+    double gain = 0.0;
   };
 
  public:
-  // 与 Hik/Uvc 保持一致的构造签名
   explicit WebotsCamera(LibXR::HardwareContainer& hw, LibXR::ApplicationManager& app,
-                        CameraBase::CameraInfo info, RuntimeParam runtime);
+                        RuntimeParam runtime);
 
   ~WebotsCamera();
 
   void SetRuntimeParam(const RuntimeParam& p);
   void OnMonitor() override {}
 
-  // === CameraBase 纯虚接口实现 ===
-  void SetExposure(double exposure) override;  // RamFS: set_exposure <val>
-  void SetGain(double gain) override;          // RamFS: set_gain <val>（记录+告警）
+  void SetExposure(double exposure) override;
+  void SetGain(double gain) override;
 
  private:
   void UpdateParameters();
-  static void ThreadFun(WebotsCamera* self);
+  static void ThreadFun(WebotsCamera<StaticInfoV>* self);
   static int FpsToPeriodMS(int fps, int fallback_ms);
   CameraBase::PoseStamped ReadCameraPoseStamped(LibXR::MicrosecondTimestamp timestamp) const;
 
  private:
-  // 大 BGR 缓冲（匹配其它相机模块风格）
   std::unique_ptr<std::array<uint8_t, BUF_BYTES>> frame_buf_{};
 
-  // 参数
-  CameraBase::CameraInfo info_{};
+  CameraBase::CameraInfo info_{CameraBase::MakeRuntimeInfo(kStaticInfo)};
   RuntimeParam runtime_{};
 
-  // Topics（与其它相机保持一致的名字/类型）
   LibXR::Topic frame_topic_ = LibXR::Topic("image_raw", sizeof(cv::Mat));
+  LibXR::Topic image_header_topic_ =
+      LibXR::Topic("image_header", sizeof(CameraBase::ImageHeader));
   LibXR::Topic info_topic_ = LibXR::Topic("camera_info", sizeof(CameraBase::CameraInfo));
   LibXR::Topic camera_pose_topic_ =
       LibXR::Topic("camera_pose", sizeof(CameraBase::PoseStamped));
   LibXR::Topic gimbal_rotation_topic_ =
       LibXR::Topic::FindOrCreate<LibXR::Quaternion<float>>("rotation");
 
-  // Webots 设备
   webots::Robot* robot_{};
   webots::Camera* cam_ = nullptr;
   webots::Node* cam_node_ = nullptr;
   webots::Supervisor* supervisor_ = nullptr;
-  int time_step_ms_ = 0;       // 世界 basicTimeStep（ms）
-  int sample_period_ms_ = 33;  // Camera enable 周期 ~ 1000/fps
+  int time_step_ms_ = 0;
+  int sample_period_ms_ = 33;
   int publish_interval_steps_ = 1;
 
-  // 线程 / 状态
   std::atomic<bool> running_{false};
   LibXR::Thread capture_thread_{};
   int fail_count_ = 0;
+  uint64_t frame_sequence_ = 0;
   uint64_t last_publish_bucket_ = UINT64_MAX;
 };
 
-// 由宿主环境提供的 Webots Robot 指针（与现有代码保持一致）
 extern webots::Robot* _libxr_webots_robot_handle;
+
+#include "WebotsCamera.inl"

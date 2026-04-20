@@ -83,9 +83,44 @@ jobs:
         run: |
           xrobot_add_mod BlinkLED --instance-id BlinkLED_0
 
-      - name: Add this repo module
+      - name: Create test module config
         run: |
-          xrobot_add_mod ${{ env.XR_MODULE_NAME }} && xrobot_add_mod qdu-future/CameraBase && cat User/xrobot.yaml
+          xrobot_add_mod qdu-future/CameraBase
+          cat > User/xrobot.yaml <<'EOF'
+          constexpr_namespace: ProjectConstexpr
+
+          constexprs:
+            MainCameraInfo:
+              type: CameraTypes::CameraInfo
+              value:
+                width: 1280
+                height: 720
+                step: 3840
+                encoding: CameraTypes::Encoding::BGR8
+                camera_matrix: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+                distortion_model: CameraTypes::DistortionModel::PLUMB_BOB
+                distortion_coefficients: [0.0, 0.0, 0.0, 0.0, 0.0]
+                rectification_matrix: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+                projection_matrix: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+          modules:
+            - id: BlinkLED_0
+              name: BlinkLED
+              constructor_args:
+                blink_cycle: 250
+            - id: WebotsCamera_0
+              name: WebotsCamera
+              template_args:
+                Info: {constexpr: MainCameraInfo}
+              constructor_args:
+                runtime:
+                  device_name: camera
+                  fps: 30
+                  exposure: 1.0
+                  gain: 0.0
+                  image_topic_name: image_frame
+          EOF
+          cat User/xrobot.yaml
 
       - name: Generate main again
         run: |

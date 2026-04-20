@@ -78,7 +78,7 @@ class WebotsCamera : public LibXR::Application, public CameraBase
   void UpdateParameters();
   static void ThreadFun(WebotsCamera<CameraInfoV>* self);
   static int FpsToPeriodMS(int fps, int fallback_ms);
-  CameraBase::PoseStamped ReadCameraPoseStamped(LibXR::MicrosecondTimestamp timestamp) const;
+  PoseStamped ReadCameraPoseStamped(LibXR::MicrosecondTimestamp timestamp) const;
 
  private:
   std::unique_ptr<std::array<uint8_t, BUF_BYTES>> frame_buf_{};
@@ -89,7 +89,7 @@ class WebotsCamera : public LibXR::Application, public CameraBase
   LibXR::Topic image_header_topic_ =
       LibXR::Topic("image_header", sizeof(CameraBase::ImageHeader));
   LibXR::Topic camera_pose_topic_ =
-      LibXR::Topic("camera_pose", sizeof(CameraBase::PoseStamped));
+      LibXR::Topic("camera_pose", sizeof(PoseStamped));
   LibXR::Topic gimbal_rotation_topic_ =
       LibXR::Topic::FindOrCreate<LibXR::Quaternion<float>>("rotation");
 

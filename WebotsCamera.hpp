@@ -36,6 +36,7 @@ depends:
 #include "CameraBase.hpp"
 #include "app_framework.hpp"
 #include "libxr.hpp"
+#include "linux_shared_topic.hpp"
 #include "message.hpp"
 #include "thread.hpp"
 
@@ -49,10 +50,8 @@ class WebotsCamera : public LibXR::Application, public CameraBase
 {
  public:
   static inline constexpr CameraBase::CameraInfo kCameraInfo = CameraInfoV;
-  static constexpr int MAX_W = 4096;
-  static constexpr int MAX_H = 3072;
   static constexpr int CH = 3;
-  static constexpr size_t BUF_BYTES = static_cast<size_t>(MAX_W) * MAX_H * CH;
+  using SharedImageTopic = LibXR::LinuxSharedTopic<CameraBase::SharedImageFrame>;
 
   struct PoseStamped
   {
@@ -88,13 +87,10 @@ class WebotsCamera : public LibXR::Application, public CameraBase
   PoseStamped ReadCameraPoseStamped(LibXR::MicrosecondTimestamp timestamp) const;
 
  private:
-  std::unique_ptr<std::array<uint8_t, BUF_BYTES>> frame_buf_{};
-
   RuntimeParam runtime_{};
 
-  LibXR::Topic frame_topic_ = LibXR::Topic("image_raw", sizeof(cv::Mat));
-  LibXR::Topic image_header_topic_ =
-      LibXR::Topic("image_header", sizeof(CameraBase::ImageHeader));
+  SharedImageTopic image_frame_topic_ = SharedImageTopic(
+      CameraBase::kSharedImageTopicName, LibXR::LinuxSharedTopicConfig{4, 2, 4});
   LibXR::Topic camera_pose_topic_ =
       LibXR::Topic("camera_pose", sizeof(PoseStamped));
   LibXR::Topic gimbal_rotation_topic_ =

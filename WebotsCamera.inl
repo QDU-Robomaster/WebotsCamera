@@ -51,7 +51,6 @@ WebotsCamera<CameraInfoV>::WebotsCamera(LibXR::HardwareContainer& hw,
     throw std::runtime_error("WebotsCamera: camera device not found");
   }
 
-  frame_buf_ = std::make_unique<std::array<uint8_t, BUF_BYTES>>();
 
   const uint32_t actual_width = static_cast<uint32_t>(cam_->getWidth());
   const uint32_t actual_height = static_cast<uint32_t>(cam_->getHeight());
@@ -280,31 +279,64 @@ void WebotsCamera<CameraInfoV>::ThreadFun(WebotsCamera<CameraInfoV>* self)
     const int width = self->cam_->getWidth();
     const int height = self->cam_->getHeight();
 
-    if (rgba && width > 0 && height > 0 && width <= MAX_W && height <= MAX_H)
+    const size_t packed_step = static_cast<size_t>(width) * CH;
+    const size_t data_size = packed_step * static_cast<size_t>(height);
+
+    if (rgba && width > 0 && height > 0 &&
+        data_size <= CameraBase::kSharedImageMaxBytes)
     {
+      typename SharedImageTopic::Data shared_image_data;
+      const auto create_ans = self->image_frame_topic_.CreateData(shared_image_data);
+      if (create_ans != LibXR::ErrorCode::OK)
+      {
+        self->fail_count_++;
+        XR_LOG_WARN("WebotsCamera: shared image slot unavailable (err=%d).",
+                    static_cast<int>(create_ans));
+        continue;
+      }
+
+      CameraBase::SharedImageFrame* shared_frame = shared_image_data.GetData();
+      if (shared_frame == nullptr)
+      {
+        self->fail_count_++;
+        XR_LOG_WARN("WebotsCamera: shared image slot returned null payload.");
+        continue;
+      }
+
       cv::Mat src(height, width, CV_8UC4, const_cast<unsigned char*>(rgba));
-      cv::Mat dst(height, width, CV_8UC3, self->frame_buf_->data(),
-                  static_cast<size_t>(width) * CH);
+      cv::Mat dst(height, width, CV_8UC3, shared_frame->data.data(), packed_step);
       cv::cvtColor(src, dst, cv::COLOR_BGRA2BGR);
 
       const auto timestamp = LibXR::MicrosecondTimestamp(
           static_cast<uint64_t>(std::llround(self->robot_->getTime() * 1000000.0)));
-      auto pose_msg = self->ReadCameraPoseStamped(timestamp);
-      CameraBase::ImageHeader image_header{};
-      image_header.timestamp = timestamp;
-      image_header.sequence = self->frame_sequence_++;
+      shared_frame->timestamp_us = static_cast<uint64_t>(timestamp);
+      shared_frame->sequence = self->frame_sequence_++;
+      shared_frame->width = static_cast<uint32_t>(width);
+      shared_frame->height = static_cast<uint32_t>(height);
+      shared_frame->step = static_cast<uint32_t>(packed_step);
+      shared_frame->data_size = static_cast<uint32_t>(data_size);
+      shared_frame->encoding = CameraBase::Encoding::BGR8;
 
+      auto pose_msg = self->ReadCameraPoseStamped(timestamp);
       self->camera_pose_topic_.Publish(pose_msg);
-      self->image_header_topic_.Publish(image_header);
-      self->frame_topic_.Publish(dst);
+
+      const auto publish_ans = self->image_frame_topic_.Publish(shared_image_data);
+      if (publish_ans != LibXR::ErrorCode::OK)
+      {
+        self->fail_count_++;
+        XR_LOG_WARN("WebotsCamera: shared image publish failed (err=%d).",
+                    static_cast<int>(publish_ans));
+        continue;
+      }
 
       self->fail_count_ = 0;
     }
     else
     {
       self->fail_count_++;
-      XR_LOG_WARN("WebotsCamera: getImage failed or invalid size (W=%d H=%d).", width,
-                  height);
+      XR_LOG_WARN(
+          "WebotsCamera: getImage failed or image exceeds shared frame capacity (W=%d H=%d bytes=%zu).",
+          width, height, data_size);
     }
 
     if (self->fail_count_ > 5)

@@ -44,11 +44,11 @@ depends:
 #include <webots/Robot.hpp>
 #include <webots/Supervisor.hpp>
 
-template <CameraBase::StaticInfo StaticInfoV>
+template <CameraBase::CameraInfo CameraInfoV>
 class WebotsCamera : public LibXR::Application, public CameraBase
 {
  public:
-  static inline constexpr CameraBase::StaticInfo kStaticInfo = StaticInfoV;
+  static inline constexpr CameraBase::CameraInfo kCameraInfo = CameraInfoV;
   static constexpr int MAX_W = 4096;
   static constexpr int MAX_H = 3072;
   static constexpr int CH = 3;
@@ -76,20 +76,18 @@ class WebotsCamera : public LibXR::Application, public CameraBase
 
  private:
   void UpdateParameters();
-  static void ThreadFun(WebotsCamera<StaticInfoV>* self);
+  static void ThreadFun(WebotsCamera<CameraInfoV>* self);
   static int FpsToPeriodMS(int fps, int fallback_ms);
   CameraBase::PoseStamped ReadCameraPoseStamped(LibXR::MicrosecondTimestamp timestamp) const;
 
  private:
   std::unique_ptr<std::array<uint8_t, BUF_BYTES>> frame_buf_{};
 
-  CameraBase::CameraInfo info_{CameraBase::MakeRuntimeInfo(kStaticInfo)};
   RuntimeParam runtime_{};
 
   LibXR::Topic frame_topic_ = LibXR::Topic("image_raw", sizeof(cv::Mat));
   LibXR::Topic image_header_topic_ =
       LibXR::Topic("image_header", sizeof(CameraBase::ImageHeader));
-  LibXR::Topic info_topic_ = LibXR::Topic("camera_info", sizeof(CameraBase::CameraInfo));
   LibXR::Topic camera_pose_topic_ =
       LibXR::Topic("camera_pose", sizeof(CameraBase::PoseStamped));
   LibXR::Topic gimbal_rotation_topic_ =

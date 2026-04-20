@@ -10,6 +10,7 @@ constructor_args:
       exposure: 1.0
       gain: 0.0
       image_topic_name: "image_frame"
+      pose_def_name: "camera"
 template_args:
   - Info:
       width: 1280
@@ -33,7 +34,10 @@ depends:
 #include <cmath>
 #include <cstdlib>
 #include <cstdint>
+#include <cstring>
 #include <stdexcept>
+#include <string>
+#include <utility>
 
 #include <opencv2/core/mat.hpp>
 #include <opencv2/imgproc.hpp>
@@ -92,7 +96,8 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
     int fps = 30;
     double exposure = 1.0;
     double gain = 0.0;
-    const char* image_topic_name = "image_frame";
+    std::string image_topic_name = "image_frame";
+    std::string pose_def_name = "camera";
   };
 
  public:
@@ -158,7 +163,7 @@ WebotsCamera<CameraInfoV>::WebotsCamera(LibXR::HardwareContainer& hw,
                                         RuntimeParam runtime)
     : Base(hw, runtime.device_name),
       runtime_(runtime),
-      image_frame_topic_(runtime_.image_topic_name, image_topic_config),
+      image_frame_topic_(runtime_.image_topic_name.c_str(), image_topic_config),
       robot_(_libxr_webots_robot_handle)
 {
   XR_LOG_INFO("Starting WebotsCamera!");
@@ -219,7 +224,7 @@ WebotsCamera<CameraInfoV>::WebotsCamera(LibXR::HardwareContainer& hw,
       {
         if (self->cam_node_ == nullptr)
         {
-          self->cam_node_ = self->supervisor_->getFromDef("camera");
+          self->cam_node_ = self->supervisor_->getFromDef(self->runtime_.pose_def_name.c_str());
           return;
         }
 
@@ -263,7 +268,7 @@ typename WebotsCamera<CameraInfoV>::PoseStamped WebotsCamera<CameraInfoV>::ReadC
   if (cam_node_ == nullptr && supervisor_ != nullptr)
   {
     auto* mutable_self = const_cast<WebotsCamera<CameraInfoV>*>(this);
-    mutable_self->cam_node_ = supervisor_->getFromDef("camera");
+    mutable_self->cam_node_ = supervisor_->getFromDef(runtime_.pose_def_name.c_str());
   }
   if (cam_node_ == nullptr)
   {
@@ -297,11 +302,34 @@ typename WebotsCamera<CameraInfoV>::PoseStamped WebotsCamera<CameraInfoV>::ReadC
 template <CameraTypes::CameraInfo CameraInfoV>
 void WebotsCamera<CameraInfoV>::SetRuntimeParam(const RuntimeParam& p)
 {
+  const auto same_cstr = [](const char* lhs, const char* rhs)
+  {
+    return std::strcmp(lhs != nullptr ? lhs : "", rhs != nullptr ? rhs : "") == 0;
+  };
+
   const bool topic_changed = runtime_.image_topic_name != p.image_topic_name;
-  runtime_ = p;
+  const bool pose_def_changed = runtime_.pose_def_name != p.pose_def_name;
+  const bool device_changed = !same_cstr(runtime_.device_name, p.device_name);
+
+  RuntimeParam next = p;
+  if (device_changed)
+  {
+    XR_LOG_WARN(
+        "WebotsCamera: device_name runtime change '%s' -> '%s' requires reconstruction. "
+        "Keeping current camera binding.",
+        runtime_.device_name != nullptr ? runtime_.device_name : "",
+        p.device_name != nullptr ? p.device_name : "");
+    next.device_name = runtime_.device_name;
+  }
+
+  runtime_ = std::move(next);
   if (topic_changed)
   {
-    image_frame_topic_ = SharedImageTopic(runtime_.image_topic_name, image_topic_config);
+    image_frame_topic_ = SharedImageTopic(runtime_.image_topic_name.c_str(), image_topic_config);
+  }
+  if (pose_def_changed)
+  {
+    cam_node_ = nullptr;
   }
   UpdateParameters();
 }

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <stdexcept>
 
 #include <opencv2/imgproc.hpp>
 
@@ -13,7 +14,7 @@
 #include "transform.hpp"
 #include "webots/Supervisor.hpp"
 
-template <CameraBase::CameraInfo CameraInfoV>
+template <CameraTypes::CameraInfo CameraInfoV>
 int WebotsCamera<CameraInfoV>::FpsToPeriodMS(int fps, int fallback_ms)
 {
   if (fps <= 0)
@@ -25,18 +26,21 @@ int WebotsCamera<CameraInfoV>::FpsToPeriodMS(int fps, int fallback_ms)
   return ms < 1 ? 1 : ms;
 }
 
-template <CameraBase::CameraInfo CameraInfoV>
+template <CameraTypes::CameraInfo CameraInfoV>
 WebotsCamera<CameraInfoV>::WebotsCamera(LibXR::HardwareContainer& hw,
                                         LibXR::ApplicationManager& app,
                                         RuntimeParam runtime)
-    : CameraBase(hw, runtime.device_name), runtime_(runtime), robot_(_libxr_webots_robot_handle)
+    : Base(hw, runtime.device_name),
+      runtime_(runtime),
+      image_frame_topic_(runtime_.image_topic_name, kImageTopicConfig),
+      robot_(_libxr_webots_robot_handle)
 {
   XR_LOG_INFO("Starting WebotsCamera!");
 
   if (!robot_)
   {
     XR_LOG_ERROR("Webots robot handle is null!");
-    exit(-1);
+    std::exit(-1);
   }
   time_step_ms_ = static_cast<int>(robot_->getBasicTimeStep());
   if (time_step_ms_ <= 0)
@@ -51,29 +55,21 @@ WebotsCamera<CameraInfoV>::WebotsCamera(LibXR::HardwareContainer& hw,
     throw std::runtime_error("WebotsCamera: camera device not found");
   }
 
-
   const uint32_t actual_width = static_cast<uint32_t>(cam_->getWidth());
   const uint32_t actual_height = static_cast<uint32_t>(cam_->getHeight());
-  if (kCameraInfo.encoding != CameraBase::Encoding::BGR8)
-  {
-    XR_LOG_WARN("WebotsCamera: expected BGR8 constexpr encoding, got %u",
-                static_cast<unsigned>(kCameraInfo.encoding));
-  }
-  if (kCameraInfo.width != 0 && kCameraInfo.width != actual_width)
-  {
-    XR_LOG_WARN("WebotsCamera: camera width mismatch constexpr=%u actual=%u",
-                kCameraInfo.width, actual_width);
-  }
-  if (kCameraInfo.height != 0 && kCameraInfo.height != actual_height)
-  {
-    XR_LOG_WARN("WebotsCamera: camera height mismatch constexpr=%u actual=%u",
-                kCameraInfo.height, actual_height);
-  }
   const uint32_t packed_step = actual_width * CH;
-  if (kCameraInfo.step != 0 && kCameraInfo.step != packed_step)
+  if (kCameraInfo.encoding != CameraTypes::Encoding::BGR8)
   {
-    XR_LOG_WARN("WebotsCamera: camera step mismatch constexpr=%u actual=%u",
-                kCameraInfo.step, packed_step);
+    throw std::runtime_error("WebotsCamera: constexpr encoding must be BGR8");
+  }
+  if (kCameraInfo.width != actual_width || kCameraInfo.height != actual_height ||
+      kCameraInfo.step != packed_step)
+  {
+    XR_LOG_ERROR(
+        "WebotsCamera: constexpr geometry mismatch width=%u/%u height=%u/%u step=%u/%u",
+        kCameraInfo.width, actual_width, kCameraInfo.height, actual_height,
+        kCameraInfo.step, packed_step);
+    throw std::runtime_error("WebotsCamera: constexpr geometry mismatch");
   }
 
   sample_period_ms_ = FpsToPeriodMS(runtime_.fps, 33);
@@ -121,7 +117,7 @@ WebotsCamera<CameraInfoV>::WebotsCamera(LibXR::HardwareContainer& hw,
   app.Register(*this);
 }
 
-template <CameraBase::CameraInfo CameraInfoV>
+template <CameraTypes::CameraInfo CameraInfoV>
 WebotsCamera<CameraInfoV>::~WebotsCamera()
 {
   running_.store(false);
@@ -135,7 +131,7 @@ WebotsCamera<CameraInfoV>::~WebotsCamera()
   XR_LOG_INFO("WebotsCamera destroyed!");
 }
 
-template <CameraBase::CameraInfo CameraInfoV>
+template <CameraTypes::CameraInfo CameraInfoV>
 typename WebotsCamera<CameraInfoV>::PoseStamped WebotsCamera<CameraInfoV>::ReadCameraPoseStamped(
     LibXR::MicrosecondTimestamp timestamp) const
 {
@@ -178,14 +174,19 @@ typename WebotsCamera<CameraInfoV>::PoseStamped WebotsCamera<CameraInfoV>::ReadC
   return pose;
 }
 
-template <CameraBase::CameraInfo CameraInfoV>
+template <CameraTypes::CameraInfo CameraInfoV>
 void WebotsCamera<CameraInfoV>::SetRuntimeParam(const RuntimeParam& p)
 {
+  const bool topic_changed = runtime_.image_topic_name != p.image_topic_name;
   runtime_ = p;
+  if (topic_changed)
+  {
+    image_frame_topic_ = SharedImageTopic(runtime_.image_topic_name, kImageTopicConfig);
+  }
   UpdateParameters();
 }
 
-template <CameraBase::CameraInfo CameraInfoV>
+template <CameraTypes::CameraInfo CameraInfoV>
 void WebotsCamera<CameraInfoV>::UpdateParameters()
 {
   if (!cam_)
@@ -220,7 +221,7 @@ void WebotsCamera<CameraInfoV>::UpdateParameters()
   }
 }
 
-template <CameraBase::CameraInfo CameraInfoV>
+template <CameraTypes::CameraInfo CameraInfoV>
 void WebotsCamera<CameraInfoV>::SetExposure(double exposure)
 {
   runtime_.exposure = exposure;
@@ -235,7 +236,7 @@ void WebotsCamera<CameraInfoV>::SetExposure(double exposure)
   }
 }
 
-template <CameraBase::CameraInfo CameraInfoV>
+template <CameraTypes::CameraInfo CameraInfoV>
 void WebotsCamera<CameraInfoV>::SetGain(double gain)
 {
   runtime_.gain = gain;
@@ -243,7 +244,7 @@ void WebotsCamera<CameraInfoV>::SetGain(double gain)
               runtime_.gain);
 }
 
-template <CameraBase::CameraInfo CameraInfoV>
+template <CameraTypes::CameraInfo CameraInfoV>
 void WebotsCamera<CameraInfoV>::ThreadFun(WebotsCamera<CameraInfoV>* self)
 {
   XR_LOG_INFO("Publishing image!");
@@ -278,12 +279,13 @@ void WebotsCamera<CameraInfoV>::ThreadFun(WebotsCamera<CameraInfoV>* self)
     const unsigned char* rgba = self->cam_->getImage();
     const int width = self->cam_->getWidth();
     const int height = self->cam_->getHeight();
-
     const size_t packed_step = static_cast<size_t>(width) * CH;
     const size_t data_size = packed_step * static_cast<size_t>(height);
 
-    if (rgba && width > 0 && height > 0 &&
-        data_size <= CameraBase::SharedImageFrame::max_bytes)
+    if (rgba && width == static_cast<int>(kCameraInfo.width) &&
+        height == static_cast<int>(kCameraInfo.height) &&
+        packed_step == static_cast<size_t>(kCameraInfo.step) &&
+        data_size == Base::kFrameBytes)
     {
       typename SharedImageTopic::Data shared_image_data;
       const auto create_ans = self->image_frame_topic_.CreateData(shared_image_data);
@@ -295,7 +297,7 @@ void WebotsCamera<CameraInfoV>::ThreadFun(WebotsCamera<CameraInfoV>* self)
         continue;
       }
 
-      CameraBase::SharedImageFrame* shared_frame = shared_image_data.GetData();
+      SharedImageFrame* shared_frame = shared_image_data.GetData();
       if (shared_frame == nullptr)
       {
         self->fail_count_++;
@@ -304,18 +306,14 @@ void WebotsCamera<CameraInfoV>::ThreadFun(WebotsCamera<CameraInfoV>* self)
       }
 
       cv::Mat src(height, width, CV_8UC4, const_cast<unsigned char*>(rgba));
-      cv::Mat dst(height, width, CV_8UC3, shared_frame->data.data(), packed_step);
+      cv::Mat dst(height, width, CV_8UC3, shared_frame->data.data(),
+                  static_cast<size_t>(kCameraInfo.step));
       cv::cvtColor(src, dst, cv::COLOR_BGRA2BGR);
 
       const auto timestamp = LibXR::MicrosecondTimestamp(
           static_cast<uint64_t>(std::llround(self->robot_->getTime() * 1000000.0)));
       shared_frame->timestamp_us = static_cast<uint64_t>(timestamp);
       shared_frame->sequence = self->frame_sequence_++;
-      shared_frame->width = static_cast<uint32_t>(width);
-      shared_frame->height = static_cast<uint32_t>(height);
-      shared_frame->step = static_cast<uint32_t>(packed_step);
-      shared_frame->data_size = static_cast<uint32_t>(data_size);
-      shared_frame->encoding = CameraBase::Encoding::BGR8;
 
       auto pose_msg = self->ReadCameraPoseStamped(timestamp);
       self->camera_pose_topic_.Publish(pose_msg);
@@ -335,7 +333,7 @@ void WebotsCamera<CameraInfoV>::ThreadFun(WebotsCamera<CameraInfoV>* self)
     {
       self->fail_count_++;
       XR_LOG_WARN(
-          "WebotsCamera: getImage failed or image exceeds shared frame capacity (W=%d H=%d bytes=%zu).",
+          "WebotsCamera: getImage failed or image geometry mismatched (W=%d H=%d bytes=%zu).",
           width, height, data_size);
     }
 

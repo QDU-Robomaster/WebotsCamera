@@ -5,18 +5,19 @@
 module_description: Webots simulated camera publisher (BGR8)
 constructor_args:
   - runtime:
-      device_name: "camera"   # Webots 场景树中的 Camera 名称
-      fps: 30                 # 期望帧率（通过 enable 周期近似）
-      exposure: 1.0           # Webots 相机曝光比例（>1 更亮，<1 更暗）
-      gain: 0.0               # 保留字段：Webots 无原生增益，记录+告警
+      device_name: "camera"
+      fps: 30
+      exposure: 1.0
+      gain: 0.0
+      image_topic_name: "image_frame"
 template_args:
   - Info:
       width: 1280
       height: 720
       step: 3840
-      encoding: CameraBase::Encoding::BGR8
+      encoding: CameraTypes::Encoding::BGR8
       camera_matrix: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
-      distortion_model: CameraBase::DistortionModel::PLUMB_BOB
+      distortion_model: CameraTypes::DistortionModel::PLUMB_BOB
       distortion_coefficients: [0.0, 0.0, 0.0, 0.0, 0.0]
       rectification_matrix: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
       projection_matrix: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
@@ -44,13 +45,17 @@ depends:
 #include <webots/Robot.hpp>
 #include <webots/Supervisor.hpp>
 
-template <CameraBase::CameraInfo CameraInfoV>
-class WebotsCamera : public LibXR::Application, public CameraBase
+template <CameraTypes::CameraInfo CameraInfoV>
+class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
 {
  public:
-  static inline constexpr CameraBase::CameraInfo kCameraInfo = CameraInfoV;
+  using Base = CameraBase<CameraInfoV>;
+  using CameraInfo = typename Base::CameraInfo;
+  using SharedImageFrame = typename Base::SharedImageFrame;
+  using SharedImageTopic = LibXR::LinuxSharedTopic<SharedImageFrame>;
+
+  static inline constexpr CameraInfo kCameraInfo = CameraInfoV;
   static constexpr int CH = 3;
-  using SharedImageTopic = LibXR::LinuxSharedTopic<CameraBase::SharedImageFrame>;
   static constexpr LibXR::LinuxSharedTopicConfig kImageTopicConfig{
       .slot_num = 4,
       .subscriber_num = 2,
@@ -70,6 +75,7 @@ class WebotsCamera : public LibXR::Application, public CameraBase
     int fps = 30;
     double exposure = 1.0;
     double gain = 0.0;
+    const char* image_topic_name = "image_frame";
   };
 
  public:
@@ -92,11 +98,8 @@ class WebotsCamera : public LibXR::Application, public CameraBase
 
  private:
   RuntimeParam runtime_{};
-
-  SharedImageTopic image_frame_topic_ =
-      SharedImageTopic(CameraBase::SharedImageFrame::topic_name, kImageTopicConfig);
-  LibXR::Topic camera_pose_topic_ =
-      LibXR::Topic("camera_pose", sizeof(PoseStamped));
+  SharedImageTopic image_frame_topic_;
+  LibXR::Topic camera_pose_topic_ = LibXR::Topic("camera_pose", sizeof(PoseStamped));
   LibXR::Topic gimbal_rotation_topic_ =
       LibXR::Topic::FindOrCreate<LibXR::Quaternion<float>>("rotation");
 

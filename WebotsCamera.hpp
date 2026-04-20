@@ -29,7 +29,6 @@ depends:
 #include <array>
 #include <atomic>
 #include <cstdint>
-#include <memory>
 
 #include <opencv2/core/mat.hpp>
 
@@ -52,6 +51,11 @@ class WebotsCamera : public LibXR::Application, public CameraBase
   static inline constexpr CameraBase::CameraInfo kCameraInfo = CameraInfoV;
   static constexpr int CH = 3;
   using SharedImageTopic = LibXR::LinuxSharedTopic<CameraBase::SharedImageFrame>;
+  static constexpr LibXR::LinuxSharedTopicConfig kImageTopicConfig{
+      .slot_num = 4,
+      .subscriber_num = 2,
+      .queue_num = 4,
+  };
 
   struct PoseStamped
   {
@@ -89,8 +93,8 @@ class WebotsCamera : public LibXR::Application, public CameraBase
  private:
   RuntimeParam runtime_{};
 
-  SharedImageTopic image_frame_topic_ = SharedImageTopic(
-      CameraBase::kSharedImageTopicName, LibXR::LinuxSharedTopicConfig{4, 2, 4});
+  SharedImageTopic image_frame_topic_ =
+      SharedImageTopic(CameraBase::SharedImageFrame::topic_name, kImageTopicConfig);
   LibXR::Topic camera_pose_topic_ =
       LibXR::Topic("camera_pose", sizeof(PoseStamped));
   LibXR::Topic gimbal_rotation_topic_ =

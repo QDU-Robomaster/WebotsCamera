@@ -283,7 +283,7 @@ void WebotsCamera<CameraInfoV>::ThreadFun(WebotsCamera<CameraInfoV>* self)
     const size_t data_size = packed_step * static_cast<size_t>(height);
 
     if (rgba && width > 0 && height > 0 &&
-        data_size <= CameraBase::kSharedImageMaxBytes)
+        data_size <= CameraBase::SharedImageFrame::max_bytes)
     {
       typename SharedImageTopic::Data shared_image_data;
       const auto create_ans = self->image_frame_topic_.CreateData(shared_image_data);

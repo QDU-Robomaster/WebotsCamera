@@ -54,6 +54,13 @@ class WebotsCamera : public LibXR::Application, public CameraBase
   static constexpr int CH = 3;
   static constexpr size_t BUF_BYTES = static_cast<size_t>(MAX_W) * MAX_H * CH;
 
+  struct PoseStamped
+  {
+    LibXR::MicrosecondTimestamp timestamp{};
+    LibXR::Quaternion<float> rotation{};
+    LibXR::Position<float> translation{};
+  };
+
   struct RuntimeParam
   {
     const char* device_name = "camera";

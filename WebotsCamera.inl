@@ -137,10 +137,10 @@ WebotsCamera<CameraInfoV>::~WebotsCamera()
 }
 
 template <CameraBase::CameraInfo CameraInfoV>
-PoseStamped WebotsCamera<CameraInfoV>::ReadCameraPoseStamped(
+typename WebotsCamera<CameraInfoV>::PoseStamped WebotsCamera<CameraInfoV>::ReadCameraPoseStamped(
     LibXR::MicrosecondTimestamp timestamp) const
 {
-  PoseStamped pose{};
+  typename WebotsCamera<CameraInfoV>::PoseStamped pose{};
   pose.timestamp = timestamp;
 
   if (cam_node_ == nullptr && supervisor_ != nullptr)

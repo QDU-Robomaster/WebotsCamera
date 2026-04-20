@@ -50,7 +50,6 @@ depends:
 #include "logger.hpp"
 #include "message.hpp"
 #include "thread.hpp"
-#include "timer.hpp"
 #include "transform.hpp"
 
 #include <webots/Camera.hpp>
@@ -119,9 +118,9 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
 
     InitRobot();
     InitCamera();
+    InitSupervisor(hw);
     ValidateCameraGeometry();
     ConfigureSamplingOnStartup();
-    StartPosePublisher(hw);
     ApplyExposure();
     WarnUnsupportedGainIfNeeded();
     StartCaptureThread();
@@ -221,7 +220,8 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
     time_step_ms_ = static_cast<int>(robot_->getBasicTimeStep());
     if (time_step_ms_ <= 0)
     {
-      time_step_ms_ = 16;
+      XR_LOG_ERROR("Webots basic timestep is invalid: %d ms", time_step_ms_);
+      throw std::runtime_error("WebotsCamera: invalid basic timestep");
     }
   }
 
@@ -264,19 +264,9 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
     cam_->enable(sample_period_ms_);
   }
 
-  void StartPosePublisher(LibXR::HardwareContainer& hw)
+  void InitSupervisor(LibXR::HardwareContainer& hw)
   {
     supervisor_ = hw.FindOrExit<webots::Supervisor>({"supervisor"});
-
-    auto timer_handle = LibXR::Timer::CreateTask<Self*>(
-        [](Self* self)
-        {
-          self->PublishGimbalRotation();
-        },
-        this, 1);
-
-    LibXR::Timer::Add(timer_handle);
-    LibXR::Timer::Start(timer_handle);
   }
 
   void StartCaptureThread()
@@ -390,18 +380,12 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
     }
   }
 
-  void PublishGimbalRotation()
+  void PublishPose(PoseStamped pose)
   {
-    RefreshCameraNode();
-    if (cam_node_ == nullptr)
-    {
-      return;
-    }
-
-    auto pose = ReadCameraPoseStamped(CurrentSimTimeUs());
     const LibXR::EulerAngle<float> eulr = pose.rotation.ToEulerAngle();
     XR_LOG_DEBUG("WebotsCamera: camera eulr: %.3f, %.3f, %.3f", eulr.Roll(),
                  eulr.Pitch(), eulr.Yaw());
+    camera_pose_topic_.Publish(pose);
     gimbal_rotation_topic_.Publish(pose.rotation);
   }
 
@@ -467,9 +451,6 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
     shared_frame->timestamp_us = static_cast<uint64_t>(timestamp);
     shared_frame->sequence = frame_sequence_++;
 
-    auto pose = ReadCameraPoseStamped(timestamp);
-    camera_pose_topic_.Publish(pose);
-
     const auto publish_ans = image_frame_topic_.Publish(shared_image_data);
     if (publish_ans != LibXR::ErrorCode::OK)
     {
@@ -500,10 +481,14 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
         continue;
       }
 
+      const auto timestamp = self->CurrentSimTimeUs();
+      auto pose = self->ReadCameraPoseStamped(timestamp);
+      self->PublishPose(pose);
+
       const unsigned char* rgba = self->cam_->getImage();
       if (rgba != nullptr)
       {
-        self->PublishImageFrame(rgba, self->CurrentSimTimeUs());
+        self->PublishImageFrame(rgba, timestamp);
       }
       else
       {

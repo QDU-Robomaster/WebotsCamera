@@ -64,7 +64,7 @@ extern webots::Robot* _libxr_webots_robot_handle;
  * 1. 从 Webots Camera 取出原始 BGRA 图像；
  * 2. 按目标 fps 把发布节奏量化到世界步长；
  * 3. 从 supervisor 读取相机 pose，并由连续 pose 估计 motion；
- * 4. 把完整帧写入 `CameraBase::Frame`，并交给已注册的 sync 模块提交。
+ * 4. 发布 imu，再把图像写入 `CameraBase::ImageFrame` 并交给已注册的图像 sink。
  */
 template <CameraTypes::CameraInfo CameraInfoV>
 class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
@@ -73,7 +73,8 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
   using Self = WebotsCamera<CameraInfoV>;
   using Base = CameraBase<CameraInfoV>;
   using CameraInfo = typename Base::CameraInfo;
-  using Frame = typename Base::Frame;
+  using ImageFrame = typename Base::ImageFrame;
+  using ImuStamped = typename Base::ImuStamped;
 
   static inline constexpr CameraInfo camera_info = Base::camera_info;
   static constexpr int channel_count = 3;
@@ -113,11 +114,16 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
 
     // 用于 supervisor 查询相机位姿的 DEF 名字。
     std::string pose_def_name = "camera";
+
+    // 图像与 imu 的原始输出名，供同步器和其他消费者复用。
+    const char* image_topic_name = "camera_image";
+    const char* imu_topic_name = "camera_imu";
   };
 
   explicit WebotsCamera(LibXR::HardwareContainer& hw, LibXR::ApplicationManager& app,
                         RuntimeParam runtime)
-      : Base(hw, runtime.device_name), runtime_(std::move(runtime)),
+      : Base(hw, runtime.device_name, runtime.image_topic_name, runtime.imu_topic_name),
+        runtime_(std::move(runtime)),
         robot_(_libxr_webots_robot_handle)
   {
     XR_LOG_INFO("Starting WebotsCamera!");
@@ -526,59 +532,35 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
 
   // ---- 帧写入与提交 ----
 
-  bool WriteAndCommitFrame(const unsigned char* rgba, const PoseSample& pose,
-                           const MotionSample& motion, LibXR::MicrosecondTimestamp timestamp)
+  bool WriteAndCommitImage(const unsigned char* rgba, LibXR::MicrosecondTimestamp timestamp)
   {
-    if (!this->SyncReady())
+    if (!this->ImageSinkReady())
     {
       return false;
     }
 
-    Frame* frame = this->GetWritableFrame();
-    if (frame == nullptr)
+    ImageFrame* image = this->GetWritableImage();
+    if (image == nullptr)
     {
       fail_count_++;
-      XR_LOG_WARN("WebotsCamera: writable frame is null.");
+      XR_LOG_WARN("WebotsCamera: writable image is null.");
       return false;
     }
 
-    frame->timestamp_us = static_cast<uint64_t>(timestamp);
-    frame->sequence = frame_sequence_;
-    frame->rotation_wxyz = {
-        pose.rotation.w(),
-        pose.rotation.x(),
-        pose.rotation.y(),
-        pose.rotation.z(),
-    };
-    frame->translation_xyz = {
-        pose.translation[0],
-        pose.translation[1],
-        pose.translation[2],
-    };
-    frame->angular_velocity_xyz = {
-        motion.angular_velocity[0],
-        motion.angular_velocity[1],
-        motion.angular_velocity[2],
-    };
-    frame->linear_acceleration_xyz = {
-        motion.linear_acceleration[0],
-        motion.linear_acceleration[1],
-        motion.linear_acceleration[2],
-    };
+    image->timestamp_us = static_cast<uint64_t>(timestamp);
 
     // 直接把 Webots 的 BGRA 图像转换后写入当前可写帧。
     cv::Mat src(frame_height, frame_width, CV_8UC4, const_cast<unsigned char*>(rgba));
-    cv::Mat dst(frame_height, frame_width, CV_8UC3, frame->data.data(), frame_step);
+    cv::Mat dst(frame_height, frame_width, CV_8UC3, image->data.data(), frame_step);
     cv::cvtColor(src, dst, cv::COLOR_BGRA2BGR);
 
-    if (!this->CommitFrame())
+    if (!this->CommitImage())
     {
       fail_count_++;
-      XR_LOG_WARN("WebotsCamera: frame commit failed.");
+      XR_LOG_WARN("WebotsCamera: image commit failed.");
       return false;
     }
 
-    frame_sequence_++;
     fail_count_ = 0;
     return true;
   }
@@ -602,7 +584,7 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
       {
         continue;
       }
-      if (!self->SyncReady())
+      if (!self->ImageSinkReady())
       {
         continue;
       }
@@ -617,10 +599,36 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
         continue;
       }
 
+      ImuStamped imu{
+          .timestamp_us = static_cast<uint64_t>(timestamp),
+          .rotation_wxyz = {
+              pose.rotation.w(),
+              pose.rotation.x(),
+              pose.rotation.y(),
+              pose.rotation.z(),
+          },
+          .translation_xyz = {
+              pose.translation[0],
+              pose.translation[1],
+              pose.translation[2],
+          },
+          .angular_velocity_xyz = {
+              motion.angular_velocity[0],
+              motion.angular_velocity[1],
+              motion.angular_velocity[2],
+          },
+          .linear_acceleration_xyz = {
+              motion.linear_acceleration[0],
+              motion.linear_acceleration[1],
+              motion.linear_acceleration[2],
+          },
+      };
+      self->PublishImu(imu);
+
       const unsigned char* rgba = self->cam_->getImage();
       if (rgba != nullptr)
       {
-        self->WriteAndCommitFrame(rgba, pose, motion, timestamp);
+        self->WriteAndCommitImage(rgba, timestamp);
       }
       else
       {
@@ -651,7 +659,6 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
   std::atomic<bool> running_{false};
   LibXR::Thread capture_thread_{};
   int fail_count_ = 0;
-  uint64_t frame_sequence_ = 0;
   uint64_t last_publish_bucket_ = UINT64_MAX;
   bool last_pose_valid_ = false;
   uint64_t last_pose_timestamp_us_ = 0;

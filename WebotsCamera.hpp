@@ -10,7 +10,6 @@ constructor_args:
       exposure: 1.0
       gain: 0.0
       pose_def_name: "camera"
-      output_topic_name: "camera_frame_sync"
 template_args:
   - Info:
       width: 1280
@@ -25,7 +24,6 @@ template_args:
 required_hardware: []
 depends:
   - qdu-future/CameraBase
-  - qdu-future/CameraFrameSync
 === END MANIFEST === */
 // clang-format on
 
@@ -44,11 +42,9 @@ depends:
 #include <opencv2/imgproc.hpp>
 
 #include "CameraBase.hpp"
-#include "CameraFrameSync.hpp"
 #include "app_framework.hpp"
 #include "libxr.hpp"
 #include "libxr_system.hpp"
-#include "linux_shared_topic.hpp"
 #include "logger.hpp"
 #include "message.hpp"
 #include "thread.hpp"
@@ -68,7 +64,7 @@ extern webots::Robot* _libxr_webots_robot_handle;
  * 1. 从 Webots Camera 取出原始 BGRA 图像；
  * 2. 按目标 fps 把发布节奏量化到世界步长；
  * 3. 从 supervisor 读取相机 pose，并由连续 pose 估计 motion；
- * 4. 直接把图像写入 `camera_frame_sync(shared)` 的最终 shared payload。
+ * 4. 把完整帧写入 `CameraBase::Frame`，并交给已注册的 sync 模块提交。
  */
 template <CameraTypes::CameraInfo CameraInfoV>
 class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
@@ -76,13 +72,8 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
  public:
   using Self = WebotsCamera<CameraInfoV>;
   using Base = CameraBase<CameraInfoV>;
-  using FrameSync = CameraFrameSync<CameraInfoV>;
   using CameraInfo = typename Base::CameraInfo;
-  using SyncPose = typename FrameSync::Pose;
-  using SyncMotion = typename FrameSync::Motion;
-  using SyncedFrame = typename FrameSync::SyncedFrame;
-  using SyncOutputTopic = typename FrameSync::OutputTopic;
-  using SyncOutputData = typename FrameSync::OutputData;
+  using Frame = typename Base::Frame;
 
   static inline constexpr CameraInfo camera_info = Base::camera_info;
   static constexpr int channel_count = 3;
@@ -122,26 +113,14 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
 
     // 用于 supervisor 查询相机位姿的 DEF 名字。
     std::string pose_def_name = "camera";
-
-    // 最终 shared synced frame 的输出 topic。
-    const char* output_topic_name = "camera_frame_sync";
   };
 
   explicit WebotsCamera(LibXR::HardwareContainer& hw, LibXR::ApplicationManager& app,
                         RuntimeParam runtime)
-      : Base(hw, runtime.device_name),
-        output_topic_(SafeCStr(runtime.output_topic_name), FrameSync::output_topic_config),
-        runtime_(std::move(runtime)),
+      : Base(hw, runtime.device_name), runtime_(std::move(runtime)),
         robot_(_libxr_webots_robot_handle)
   {
     XR_LOG_INFO("Starting WebotsCamera!");
-
-    if (!output_topic_.Valid())
-    {
-      XR_LOG_ERROR("WebotsCamera failed to create sync topic: %s",
-                   SafeCStr(runtime_.output_topic_name));
-      throw std::runtime_error("WebotsCamera: sync topic creation failed");
-    }
 
     InitRobot();
     InitCamera();
@@ -153,9 +132,8 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
     StartCaptureThread();
 
     XR_LOG_PASS(
-        "Webots camera enabled: name=%s, topic=%s, period=%d ms, world_dt=%d ms, publish_every=%d step(s)",
-        runtime_.device_name, SafeCStr(runtime_.output_topic_name), sample_period_ms_,
-        time_step_ms_, publish_interval_steps_);
+        "Webots camera enabled: name=%s, period=%d ms, world_dt=%d ms, publish_every=%d step(s)",
+        runtime_.device_name, sample_period_ms_, time_step_ms_, publish_interval_steps_);
 
     app.Register(*this);
   }
@@ -177,8 +155,6 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
   {
     const bool pose_def_changed = runtime_.pose_def_name != runtime.pose_def_name;
     const bool device_changed = !SameCStr(runtime_.device_name, runtime.device_name);
-    const bool output_topic_changed =
-        !SameCStr(runtime_.output_topic_name, runtime.output_topic_name);
 
     RuntimeParam next = runtime;
     if (device_changed)
@@ -188,14 +164,6 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
           "Keeping current camera binding.",
           SafeCStr(runtime_.device_name), SafeCStr(runtime.device_name));
       next.device_name = runtime_.device_name;
-    }
-    if (output_topic_changed)
-    {
-      XR_LOG_WARN(
-          "WebotsCamera: output_topic_name runtime change '%s' -> '%s' requires reconstruction. "
-          "Keeping current shared topic binding.",
-          SafeCStr(runtime_.output_topic_name), SafeCStr(runtime.output_topic_name));
-      next.output_topic_name = runtime_.output_topic_name;
     }
 
     runtime_ = std::move(next);
@@ -434,39 +402,6 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
     gimbal_rotation_topic_.Publish(rotation);
   }
 
-  static SyncPose PackPose(const PoseSample& pose)
-  {
-    SyncPose packed;
-    packed.rotation_wxyz = {
-        pose.rotation.w(),
-        pose.rotation.x(),
-        pose.rotation.y(),
-        pose.rotation.z(),
-    };
-    packed.translation_xyz = {
-        pose.translation[0],
-        pose.translation[1],
-        pose.translation[2],
-    };
-    return packed;
-  }
-
-  static SyncMotion PackMotion(const MotionSample& motion)
-  {
-    SyncMotion packed;
-    packed.angular_velocity_xyz = {
-        motion.angular_velocity[0],
-        motion.angular_velocity[1],
-        motion.angular_velocity[2],
-    };
-    packed.linear_acceleration_xyz = {
-        motion.linear_acceleration[0],
-        motion.linear_acceleration[1],
-        motion.linear_acceleration[2],
-    };
-    return packed;
-  }
-
   static float WrapAngleDelta(float current, float previous)
   {
     constexpr float kPi = 3.14159265358979323846f;
@@ -589,44 +524,57 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
     return true;
   }
 
-  // ---- synced frame 输出 ----
+  // ---- 帧写入与提交 ----
 
-  bool PublishSyncFrame(const unsigned char* rgba, const PoseSample& pose,
-                        const MotionSample& motion, LibXR::MicrosecondTimestamp timestamp)
+  bool WriteAndCommitFrame(const unsigned char* rgba, const PoseSample& pose,
+                           const MotionSample& motion, LibXR::MicrosecondTimestamp timestamp)
   {
-    const auto create_ans = output_topic_.CreateData(sync_frame_data_);
-    if (create_ans != LibXR::ErrorCode::OK)
+    if (!this->SyncReady())
     {
-      sync_drop_count_++;
       return false;
     }
 
-    SyncedFrame* frame = sync_frame_data_.GetData();
+    Frame* frame = this->GetWritableFrame();
     if (frame == nullptr)
     {
       fail_count_++;
-      XR_LOG_WARN("WebotsCamera: sync payload is null.");
-      sync_frame_data_.Reset();
+      XR_LOG_WARN("WebotsCamera: writable frame is null.");
       return false;
     }
 
-    frame->image.timestamp_us = static_cast<uint64_t>(timestamp);
-    frame->image.sequence = frame_sequence_;
-    frame->pose = PackPose(pose);
-    frame->motion = PackMotion(motion);
+    frame->timestamp_us = static_cast<uint64_t>(timestamp);
+    frame->sequence = frame_sequence_;
+    frame->rotation_wxyz = {
+        pose.rotation.w(),
+        pose.rotation.x(),
+        pose.rotation.y(),
+        pose.rotation.z(),
+    };
+    frame->translation_xyz = {
+        pose.translation[0],
+        pose.translation[1],
+        pose.translation[2],
+    };
+    frame->angular_velocity_xyz = {
+        motion.angular_velocity[0],
+        motion.angular_velocity[1],
+        motion.angular_velocity[2],
+    };
+    frame->linear_acceleration_xyz = {
+        motion.linear_acceleration[0],
+        motion.linear_acceleration[1],
+        motion.linear_acceleration[2],
+    };
 
-    // 直接把 Webots 的 BGRA 图像转换后写入最终 shared payload。
+    // 直接把 Webots 的 BGRA 图像转换后写入当前可写帧。
     cv::Mat src(frame_height, frame_width, CV_8UC4, const_cast<unsigned char*>(rgba));
-    cv::Mat dst(frame_height, frame_width, CV_8UC3, frame->image.data.data(), frame_step);
+    cv::Mat dst(frame_height, frame_width, CV_8UC3, frame->data.data(), frame_step);
     cv::cvtColor(src, dst, cv::COLOR_BGRA2BGR);
 
-    const auto publish_ans = output_topic_.Publish(sync_frame_data_);
-    if (publish_ans != LibXR::ErrorCode::OK)
+    if (!this->CommitFrame())
     {
       fail_count_++;
-      XR_LOG_WARN("WebotsCamera: sync publish failed err=%d.",
-                  static_cast<int>(publish_ans));
-      sync_frame_data_.Reset();
+      XR_LOG_WARN("WebotsCamera: frame commit failed.");
       return false;
     }
 
@@ -654,6 +602,10 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
       {
         continue;
       }
+      if (!self->SyncReady())
+      {
+        continue;
+      }
 
       // 发布顺序固定为：仿真节流 -> pose -> motion -> image -> sink commit。
       const auto timestamp = self->CurrentSimTimeUs();
@@ -668,7 +620,7 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
       const unsigned char* rgba = self->cam_->getImage();
       if (rgba != nullptr)
       {
-        self->PublishSyncFrame(rgba, pose, motion, timestamp);
+        self->WriteAndCommitFrame(rgba, pose, motion, timestamp);
       }
       else
       {
@@ -681,10 +633,9 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
         XR_LOG_ERROR("WebotsCamera failed repeatedly (%d)!", self->fail_count_);
       }
     }
- }
+  }
 
  private:
-  SyncOutputTopic output_topic_;
   RuntimeParam runtime_{};
   LibXR::Topic gimbal_rotation_topic_ =
       LibXR::Topic::FindOrCreate<LibXR::Quaternion<float>>("rotation");
@@ -699,9 +650,7 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
 
   std::atomic<bool> running_{false};
   LibXR::Thread capture_thread_{};
-  SyncOutputData sync_frame_data_{};
   int fail_count_ = 0;
-  uint64_t sync_drop_count_ = 0;
   uint64_t frame_sequence_ = 0;
   uint64_t last_publish_bucket_ = UINT64_MAX;
   bool last_pose_valid_ = false;

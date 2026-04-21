@@ -9,7 +9,6 @@ constructor_args:
       fps: 30
       exposure: 1.0
       gain: 0.0
-      image_topic_name: "image_frame"
       pose_def_name: "camera"
 template_args:
   - Info:
@@ -46,7 +45,6 @@ depends:
 #include "app_framework.hpp"
 #include "libxr.hpp"
 #include "libxr_system.hpp"
-#include "linux_shared_topic.hpp"
 #include "logger.hpp"
 #include "message.hpp"
 #include "thread.hpp"
@@ -62,7 +60,11 @@ extern webots::Robot* _libxr_webots_robot_handle;
 /**
  * @brief Webots 相机模块。
  *
- * 负责取图、节流发布，以及同步输出相机位姿。
+ * 该模块负责四件事：
+ * 1. 从 Webots Camera 取出原始 BGRA 图像；
+ * 2. 按目标 fps 把发布节奏量化到世界步长；
+ * 3. 从 supervisor 读取相机 pose，并由连续 pose 估计 motion；
+ * 4. 直接把图像写入注册 sink 借出的最终 shared payload。
  */
 template <CameraTypes::CameraInfo CameraInfoV>
 class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
@@ -71,19 +73,16 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
   using Self = WebotsCamera<CameraInfoV>;
   using Base = CameraBase<CameraInfoV>;
   using CameraInfo = typename Base::CameraInfo;
-  using SharedImageFrame = typename Base::SharedImageFrame;
-  using SharedImageTopic = LibXR::LinuxSharedTopic<SharedImageFrame>;
+  using Pose = typename Base::Pose;
+  using Motion = typename Base::Motion;
+  using FrameContext = typename Base::FrameContext;
+  using FrameLease = typename Base::FrameLease;
 
   static inline constexpr CameraInfo camera_info = Base::camera_info;
   static constexpr int channel_count = 3;
   static constexpr int frame_width = static_cast<int>(camera_info.width);
   static constexpr int frame_height = static_cast<int>(camera_info.height);
   static constexpr std::size_t frame_step = static_cast<std::size_t>(camera_info.step);
-  static constexpr LibXR::LinuxSharedTopicConfig image_topic_config{
-      .slot_num = 4,
-      .subscriber_num = 2,
-      .queue_num = 4,
-  };
 
   static_assert(camera_info.encoding == CameraTypes::Encoding::BGR8,
                 "WebotsCamera requires BGR8 output encoding");
@@ -97,22 +96,32 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
     LibXR::Position<float> translation{};
   };
 
+  struct MotionStamped
+  {
+    LibXR::MicrosecondTimestamp timestamp{};
+    LibXR::Position<float> angular_velocity{};
+    LibXR::Position<float> linear_acceleration{};
+  };
+
   struct RuntimeParam
   {
+    // Webots Camera 设备名。
     const char* device_name = "camera";
+
+    // 目标发布频率。最终会被量化到世界步长上。
     int fps = 30;
+
+    // Webots 原生支持曝光，不支持 gain。
     double exposure = 1.0;
     double gain = 0.0;
-    std::string image_topic_name = "image_frame";
+
+    // 用于 supervisor 查询相机位姿的 DEF 名字。
     std::string pose_def_name = "camera";
   };
 
   explicit WebotsCamera(LibXR::HardwareContainer& hw, LibXR::ApplicationManager& app,
                         RuntimeParam runtime)
-      : Base(hw, runtime.device_name),
-        runtime_(std::move(runtime)),
-        image_frame_topic_(runtime_.image_topic_name.c_str(), image_topic_config),
-        robot_(_libxr_webots_robot_handle)
+      : Base(hw, runtime.device_name), runtime_(std::move(runtime)), robot_(_libxr_webots_robot_handle)
   {
     XR_LOG_INFO("Starting WebotsCamera!");
 
@@ -147,7 +156,6 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
 
   void SetRuntimeParam(const RuntimeParam& runtime)
   {
-    const bool topic_changed = runtime_.image_topic_name != runtime.image_topic_name;
     const bool pose_def_changed = runtime_.pose_def_name != runtime.pose_def_name;
     const bool device_changed = !SameCStr(runtime_.device_name, runtime.device_name);
 
@@ -162,11 +170,6 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
     }
 
     runtime_ = std::move(next);
-    if (topic_changed)
-    {
-      image_frame_topic_ =
-          SharedImageTopic(runtime_.image_topic_name.c_str(), image_topic_config);
-    }
     if (pose_def_changed)
     {
       cam_node_ = nullptr;
@@ -190,6 +193,8 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
   }
 
  private:
+  // ---- 基础工具 ----
+
   static const char* SafeCStr(const char* text) { return text != nullptr ? text : ""; }
 
   static bool SameCStr(const char* lhs, const char* rhs)
@@ -197,7 +202,7 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
     return std::strcmp(SafeCStr(lhs), SafeCStr(rhs)) == 0;
   }
 
-  static int FpsToPeriodMS(int fps, int fallback_ms)
+  static int FpsToPeriodMs(int fps, int fallback_ms)
   {
     if (fps <= 0)
     {
@@ -208,6 +213,14 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
     const int ms = static_cast<int>(std::lround(period));
     return ms < 1 ? 1 : ms;
   }
+
+  static int ComputePublishIntervalSteps(int period_ms, int time_step_ms)
+  {
+    return std::max(1, static_cast<int>(std::lround(static_cast<double>(period_ms) /
+                                                    static_cast<double>(time_step_ms))));
+  }
+
+  // ---- 启动与运行时参数 ----
 
   void InitRobot()
   {
@@ -256,10 +269,8 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
 
   void ConfigureSamplingOnStartup()
   {
-    sample_period_ms_ = FpsToPeriodMS(runtime_.fps, 33);
-    publish_interval_steps_ =
-        std::max(1, static_cast<int>(std::lround(static_cast<double>(sample_period_ms_) /
-                                                 static_cast<double>(time_step_ms_))));
+    sample_period_ms_ = FpsToPeriodMs(runtime_.fps, 33);
+    publish_interval_steps_ = ComputePublishIntervalSteps(sample_period_ms_, time_step_ms_);
     last_publish_bucket_ = UINT64_MAX;
     cam_->enable(sample_period_ms_);
   }
@@ -291,10 +302,9 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
 
   void ReconfigureSampling()
   {
-    const int new_period = FpsToPeriodMS(runtime_.fps, sample_period_ms_);
+    const int new_period = FpsToPeriodMs(runtime_.fps, sample_period_ms_);
     const int new_publish_interval =
-        std::max(1, static_cast<int>(std::lround(static_cast<double>(new_period) /
-                                                 static_cast<double>(time_step_ms_))));
+        ComputePublishIntervalSteps(new_period, time_step_ms_);
 
     if (new_period != sample_period_ms_)
     {
@@ -334,6 +344,8 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
         runtime_.gain);
   }
 
+  // ---- 仿真时间与节流 ----
+
   LibXR::MicrosecondTimestamp CurrentSimTimeUs() const
   {
     const double sim_time_s = robot_ != nullptr ? std::max(0.0, robot_->getTime()) : 0.0;
@@ -355,6 +367,8 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
 
   bool ConsumePublishBucket(uint64_t sim_step)
   {
+    // 把时间轴切成固定发布桶，只要进入新的桶就发布一次。
+    // 这样即使线程 sleep 存在抖动，发布节奏仍然由仿真时间决定。
     const uint64_t publish_bucket =
         sim_step / static_cast<uint64_t>(publish_interval_steps_);
 
@@ -372,6 +386,8 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
     return true;
   }
 
+  // ---- Pose / Motion 采样 ----
+
   void RefreshCameraNode()
   {
     if (cam_node_ == nullptr && supervisor_ != nullptr)
@@ -380,13 +396,71 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
     }
   }
 
-  void PublishPose(PoseStamped pose)
+  void PublishRotationTopic(const PoseStamped& pose)
   {
     const LibXR::EulerAngle<float> eulr = pose.rotation.ToEulerAngle();
     XR_LOG_DEBUG("WebotsCamera: camera eulr: %.3f, %.3f, %.3f", eulr.Roll(),
                  eulr.Pitch(), eulr.Yaw());
-    camera_pose_topic_.Publish(pose);
-    gimbal_rotation_topic_.Publish(pose.rotation);
+    auto rotation = pose.rotation;
+    gimbal_rotation_topic_.Publish(rotation);
+  }
+
+  static Pose PackPose(const PoseStamped& pose)
+  {
+    Pose packed;
+    packed.rotation_wxyz = {
+        pose.rotation.w(),
+        pose.rotation.x(),
+        pose.rotation.y(),
+        pose.rotation.z(),
+    };
+    packed.translation_xyz = {
+        pose.translation[0],
+        pose.translation[1],
+        pose.translation[2],
+    };
+    return packed;
+  }
+
+  static Motion PackMotion(const MotionStamped& motion)
+  {
+    Motion packed;
+    packed.angular_velocity_xyz = {
+        motion.angular_velocity[0],
+        motion.angular_velocity[1],
+        motion.angular_velocity[2],
+    };
+    packed.linear_acceleration_xyz = {
+        motion.linear_acceleration[0],
+        motion.linear_acceleration[1],
+        motion.linear_acceleration[2],
+    };
+    return packed;
+  }
+
+  static float WrapAngleDelta(float current, float previous)
+  {
+    constexpr float kPi = 3.14159265358979323846f;
+    constexpr float kTwoPi = 2.0f * kPi;
+
+    float delta = current - previous;
+    while (delta > kPi)
+    {
+      delta -= kTwoPi;
+    }
+    while (delta < -kPi)
+    {
+      delta += kTwoPi;
+    }
+    return delta;
+  }
+
+  void ResetMotionWarmup(const PoseStamped& pose)
+  {
+    last_pose_timestamp_us_ = static_cast<uint64_t>(pose.timestamp);
+    last_pose_translation_ = pose.translation;
+    last_pose_rotation_ = pose.rotation;
+    last_linear_velocity_valid_ = false;
   }
 
   PoseStamped ReadCameraPoseStamped(LibXR::MicrosecondTimestamp timestamp)
@@ -400,6 +474,8 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
       return pose;
     }
 
+    // Webots Camera 的局部轴定义与项目里相机坐标系不同，这里先做一次
+    // 固定补偿，再统一转成项目内使用的四元数表达。
     static const LibXR::RotationMatrix<double> compensation =
         LibXR::RotationMatrix<double>(0, 1, 0, 1, 0, 0, 0, 0, -1);
 
@@ -424,44 +500,122 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
     return pose;
   }
 
-  void PublishImageFrame(const unsigned char* rgba, LibXR::MicrosecondTimestamp timestamp)
+  bool TryReadCameraMotionStamped(const PoseStamped& pose, MotionStamped& motion)
   {
-    typename SharedImageTopic::Data shared_image_data;
-    const auto create_ans = image_frame_topic_.CreateData(shared_image_data);
-    if (create_ans != LibXR::ErrorCode::OK)
+    const uint64_t current_timestamp_us = static_cast<uint64_t>(pose.timestamp);
+    if (!last_pose_valid_)
     {
-      fail_count_++;
-      XR_LOG_WARN("WebotsCamera: shared image slot unavailable (err=%d).",
-                  static_cast<int>(create_ans));
-      return;
+      last_pose_valid_ = true;
+      ResetMotionWarmup(pose);
+      return false;
     }
 
-    SharedImageFrame* shared_frame = shared_image_data.GetData();
-    if (shared_frame == nullptr)
+    if (current_timestamp_us <= last_pose_timestamp_us_)
     {
-      fail_count_++;
-      XR_LOG_WARN("WebotsCamera: shared image slot returned null payload.");
-      return;
+      ResetMotionWarmup(pose);
+      return false;
     }
 
+    const double dt =
+        static_cast<double>(current_timestamp_us - last_pose_timestamp_us_) / 1000000.0;
+    if (dt <= 0.0)
+    {
+      ResetMotionWarmup(pose);
+      return false;
+    }
+
+    // Webots 这条链路里，pose 与图像是同一线程采样的，所以这里直接用连续
+    // pose 差分估计角速度与线加速度，不再依赖节点原生 velocity 字段。
+    const LibXR::EulerAngle<float> current_euler = pose.rotation.ToEulerAngle();
+    const LibXR::EulerAngle<float> last_euler = last_pose_rotation_.ToEulerAngle();
+    const float dt_f = static_cast<float>(dt);
+    const LibXR::Position<float> current_linear_velocity(
+        static_cast<float>((pose.translation.x() - last_pose_translation_.x()) / dt),
+        static_cast<float>((pose.translation.y() - last_pose_translation_.y()) / dt),
+        static_cast<float>((pose.translation.z() - last_pose_translation_.z()) / dt));
+
+    motion.timestamp = pose.timestamp;
+    motion.angular_velocity = LibXR::Position<float>(
+        WrapAngleDelta(current_euler.Roll(), last_euler.Roll()) / dt_f,
+        WrapAngleDelta(current_euler.Pitch(), last_euler.Pitch()) / dt_f,
+        WrapAngleDelta(current_euler.Yaw(), last_euler.Yaw()) / dt_f);
+
+    if (last_linear_velocity_valid_)
+    {
+      motion.linear_acceleration = LibXR::Position<float>(
+          static_cast<float>((current_linear_velocity.x() - last_linear_velocity_.x()) / dt),
+          static_cast<float>((current_linear_velocity.y() - last_linear_velocity_.y()) / dt),
+          static_cast<float>((current_linear_velocity.z() - last_linear_velocity_.z()) / dt));
+    }
+    else
+    {
+      // 第一份有效速度还没有历史项可差分，线加速度先置零。
+      motion.linear_acceleration = LibXR::Position<float>(0.0f, 0.0f, 0.0f);
+    }
+
+    last_pose_timestamp_us_ = current_timestamp_us;
+    last_pose_translation_ = pose.translation;
+    last_pose_rotation_ = pose.rotation;
+    last_linear_velocity_ = current_linear_velocity;
+    last_linear_velocity_valid_ = true;
+    return true;
+  }
+
+  // ---- sink 输出 ----
+
+  bool DeliverFrameToSink(const unsigned char* rgba, const PoseStamped& pose,
+                          const MotionStamped& motion, LibXR::MicrosecondTimestamp timestamp)
+  {
+    auto* sink = this->GetSink();
+    if (sink == nullptr)
+    {
+      return false;
+    }
+
+    FrameContext context{};
+    context.timestamp_us = static_cast<uint64_t>(timestamp);
+    context.sequence = frame_sequence_;
+    context.pose = PackPose(pose);
+    context.motion = PackMotion(motion);
+
+    FrameLease lease{};
+    if (!sink->AcquireFrame(context, lease))
+    {
+      fail_count_++;
+      XR_LOG_WARN("WebotsCamera: sink rejected frame ts=%llu.",
+                  static_cast<unsigned long long>(timestamp));
+      return false;
+    }
+
+    if (lease.image_data == nullptr)
+    {
+      fail_count_++;
+      XR_LOG_WARN("WebotsCamera: sink returned null image buffer.");
+      sink->AbortFrame(lease);
+      return false;
+    }
+    if (lease.image_step < frame_step)
+    {
+      fail_count_++;
+      XR_LOG_WARN("WebotsCamera: sink image step too small (%zu < %zu).", lease.image_step,
+                  frame_step);
+      sink->AbortFrame(lease);
+      return false;
+    }
+
+    // 直接把 Webots 提供的 BGRA 图像转换后写入最终 shared payload，
+    // 中间不再经过额外 image topic。
     cv::Mat src(frame_height, frame_width, CV_8UC4, const_cast<unsigned char*>(rgba));
-    cv::Mat dst(frame_height, frame_width, CV_8UC3, shared_frame->data.data(), frame_step);
+    cv::Mat dst(frame_height, frame_width, CV_8UC3, lease.image_data, lease.image_step);
     cv::cvtColor(src, dst, cv::COLOR_BGRA2BGR);
 
-    shared_frame->timestamp_us = static_cast<uint64_t>(timestamp);
-    shared_frame->sequence = frame_sequence_++;
-
-    const auto publish_ans = image_frame_topic_.Publish(shared_image_data);
-    if (publish_ans != LibXR::ErrorCode::OK)
-    {
-      fail_count_++;
-      XR_LOG_WARN("WebotsCamera: shared image publish failed (err=%d).",
-                  static_cast<int>(publish_ans));
-      return;
-    }
-
+    sink->CommitFrame(lease);
+    frame_sequence_++;
     fail_count_ = 0;
+    return true;
   }
+
+  // ---- 采集线程 ----
 
   static void ThreadFun(Self* self)
   {
@@ -481,14 +635,20 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
         continue;
       }
 
+      // 发布顺序固定为：仿真节流 -> pose -> motion -> image -> sink commit。
       const auto timestamp = self->CurrentSimTimeUs();
       auto pose = self->ReadCameraPoseStamped(timestamp);
-      self->PublishPose(pose);
+      self->PublishRotationTopic(pose);
+      MotionStamped motion{};
+      if (!self->TryReadCameraMotionStamped(pose, motion))
+      {
+        continue;
+      }
 
       const unsigned char* rgba = self->cam_->getImage();
       if (rgba != nullptr)
       {
-        self->PublishImageFrame(rgba, timestamp);
+        self->DeliverFrameToSink(rgba, pose, motion, timestamp);
       }
       else
       {
@@ -505,8 +665,6 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
 
  private:
   RuntimeParam runtime_{};
-  SharedImageTopic image_frame_topic_;
-  LibXR::Topic camera_pose_topic_ = LibXR::Topic("camera_pose", sizeof(PoseStamped));
   LibXR::Topic gimbal_rotation_topic_ =
       LibXR::Topic::FindOrCreate<LibXR::Quaternion<float>>("rotation");
 
@@ -523,4 +681,10 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
   int fail_count_ = 0;
   uint64_t frame_sequence_ = 0;
   uint64_t last_publish_bucket_ = UINT64_MAX;
+  bool last_pose_valid_ = false;
+  uint64_t last_pose_timestamp_us_ = 0;
+  LibXR::Position<float> last_pose_translation_{0.0f, 0.0f, 0.0f};
+  LibXR::Quaternion<float> last_pose_rotation_{0.0f, 0.0f, 0.0f, 1.0f};
+  bool last_linear_velocity_valid_ = false;
+  LibXR::Position<float> last_linear_velocity_{0.0f, 0.0f, 0.0f};
 };

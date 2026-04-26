@@ -91,6 +91,7 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
 
   struct PoseSample
   {
+    // 当前发布时刻的相机姿态。rotation 使用对外发布的 SP/BMI088 风格帧。
     LibXR::MicrosecondTimestamp timestamp{};
     LibXR::Quaternion<float> rotation{};
     LibXR::Position<float> translation{};
@@ -98,12 +99,14 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
 
   struct MotionSample
   {
+    // 与 PoseSample 同帧下的运动量，坐标语义必须和 rotation_wxyz 一致。
     LibXR::Position<float> angular_velocity{};
     LibXR::Position<float> linear_acceleration{};
   };
 
   struct ImuSensorNames
   {
+    // world 里通过统一前缀拼接出来的设备名，例如 camera_gyro。
     std::string gyro;
     std::string accelerometer;
   };
@@ -292,6 +295,7 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
 
   std::string ResolveImuSensorPrefix() const
   {
+    // 优先用 pose_def_name，对齐 supervisor 查询与 IMU 设备命名。
     if (!runtime_.pose_def_name.empty())
     {
       return runtime_.pose_def_name;
@@ -308,6 +312,7 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
 
   ImuSensorNames BuildImuSensorNames() const
   {
+    // 约定 world 里的 IMU 设备名为 <prefix>_gyro / <prefix>_accelerometer。
     const std::string prefix = ResolveImuSensorPrefix();
     return ImuSensorNames{
         .gyro = prefix + "_gyro",
@@ -317,6 +322,7 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
 
   void BindImuSensors()
   {
+    // 这里只做设备绑定，不做 enable，便于运行时在 pose_def 切换后重绑。
     imu_sensor_names_ = BuildImuSensorNames();
     gyro_ = robot_->getGyro(imu_sensor_names_.gyro);
     accelerometer_ = robot_->getAccelerometer(imu_sensor_names_.accelerometer);
@@ -345,6 +351,8 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
 
   void ValidateCameraGeometry() const
   {
+    // Webots Camera 的实际输出几何必须和模板参数完全一致，否则下游 frame
+    // 视图与步长都会错。
     const uint32_t actual_width = static_cast<uint32_t>(cam_->getWidth());
     const uint32_t actual_height = static_cast<uint32_t>(cam_->getHeight());
     const uint32_t packed_step = actual_width * channel_count;
@@ -364,6 +372,8 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
 
   void ConfigureSamplingOnStartup()
   {
+    // Camera 设备自己的 enable 周期只负责取图；真正对外发布节奏还要经过
+    // 后面的仿真时间桶节流。
     sample_period_ms_ = FpsToPeriodMs(runtime_.fps, 33);
     publish_interval_steps_ = ComputePublishIntervalSteps(sample_period_ms_, time_step_ms_);
     last_publish_bucket_ = UINT64_MAX;
@@ -372,6 +382,7 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
 
   void EnableImuSensors()
   {
+    // IMU 直接按 world basicTimeStep 采样，避免对角速度/加速度再做插值。
     if (gyro_ != nullptr)
     {
       gyro_->enable(time_step_ms_);
@@ -384,6 +395,7 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
 
   void DisableImuSensors()
   {
+    // disable 后把指针清空，避免后续误以为设备仍可读。
     if (gyro_ != nullptr)
     {
       gyro_->disable();
@@ -403,6 +415,7 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
 
   void ApplyEnvOverridesOnStartup()
   {
+    // 目前仅保留曝光 env 覆盖，方便做 detector/tracker A/B。
     double exposure = runtime_.exposure;
     if (ReadEnvDouble("XR_WEBOTS_CAMERA_EXPOSURE", exposure))
     {
@@ -421,6 +434,7 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
 
   void StartCaptureThread()
   {
+    // 采集线程把 pose / imu / image 串成同一条发布时间线。
     running_.store(true);
     capture_thread_.Create(this, ThreadFun, "WebotsCameraThread",
                            static_cast<size_t>(1024 * 128),
@@ -529,6 +543,7 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
 
   void RefreshCameraNode()
   {
+    // camera node 通过 supervisor 按 DEF 延迟绑定，允许 world 初始化稍晚完成。
     if (cam_node_ == nullptr && supervisor_ != nullptr)
     {
       cam_node_ = supervisor_->getFromDef(runtime_.pose_def_name.c_str());
@@ -540,6 +555,7 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
     const LibXR::EulerAngle<float> eulr = pose.rotation.ToEulerAngle();
     XR_LOG_DEBUG("WebotsCamera: camera eulr: %.3f, %.3f, %.3f", eulr.Roll(),
                  eulr.Pitch(), eulr.Yaw());
+    // 这个 topic 只发布已经过零位标定后的外部语义姿态，不暴露原始 camera node 姿态。
     auto rotation = pose.rotation;
     gimbal_rotation_topic_.Publish(rotation);
   }
@@ -560,6 +576,9 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
         r9_cam[0], r9_cam[1], r9_cam[2], r9_cam[3], r9_cam[4], r9_cam[5],
         r9_cam[6], r9_cam[7], r9_cam[8]);
 
+    // 目标发布帧采用当前系统已经接受的 SP/BMI088 风格中立姿态语义：
+    // x 向右、y 向前、z 向上。第一次读到相机姿态时冻结一份零位标定矩阵，
+    // 后续所有 rotation / gyro / accel 都以这份标定为准。
     static const LibXR::RotationMatrix<double> kNeutralGimbalToWorld(
         0.0, 1.0, 0.0,
         -1.0, 0.0, 0.0,
@@ -579,6 +598,7 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
         static_cast<float>(quat.w()), static_cast<float>(quat.x()),
         static_cast<float>(quat.y()), static_cast<float>(quat.z()));
 
+    // 当前 WebotsCamera 只负责旋转语义；平移仍维持历史上的零平移发布策略。
     pose.translation = LibXR::Position<float>(0.0f, 0.0f, 0.0f);
     return pose;
   }
@@ -592,6 +612,8 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
     }
 
     const Eigen::Matrix<double, 3, 1> raw_vector(raw_xyz[0], raw_xyz[1], raw_xyz[2]);
+    // pose_zero_calibration_ 是 “camera_node -> published frame” 的零位修正。
+    // 对向量做 transpose 等价于把 raw camera-node 向量旋到当前对外发布帧。
     const Eigen::Matrix<double, 3, 1> published_vector =
         pose_zero_calibration_.transpose() * raw_vector;
     return LibXR::Position<float>(static_cast<float>(published_vector.x()),
@@ -601,6 +623,7 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
 
   bool ReadImuMotionSample(MotionSample& motion) const
   {
+    // 在零位标定完成前，不发布 IMU，避免 rotation 与 gyro/accel 语义混帧。
     if (gyro_ == nullptr || accelerometer_ == nullptr || !pose_zero_calibrated_)
     {
       return false;
@@ -682,6 +705,7 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
       }
 
       // 发布顺序固定为：仿真节流 -> pose -> imu -> image -> sink commit。
+      // 这样同步器看到的 image/imu 时间戳来自同一发布周期，而不是各自独立节流。
       const auto timestamp = self->CurrentSimTimeUs();
       auto pose = self->ReadCameraPoseSample(timestamp);
       self->PublishRotationTopic(pose);
@@ -737,6 +761,7 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
 
  private:
   RuntimeParam runtime_{};
+  // rotation topic 保持在 gimbal domain，沿用历史消费者的查找路径。
   LibXR::Topic::Domain gimbal_domain_ = LibXR::Topic::Domain("gimbal");
   LibXR::Topic gimbal_rotation_topic_ =
       LibXR::Topic::FindOrCreate<LibXR::Quaternion<float>>("rotation", &gimbal_domain_);
@@ -755,7 +780,9 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
   std::atomic<bool> running_{false};
   LibXR::Thread capture_thread_{};
   int fail_count_ = 0;
+  // 记录最近一次已发布的仿真时间桶，避免同一时间桶内重复发图。
   uint64_t last_publish_bucket_ = UINT64_MAX;
   bool pose_zero_calibrated_ = false;
+  // 首帧冻结的零位标定矩阵：把 raw camera node 姿态/向量对齐到外部发布帧。
   LibXR::RotationMatrix<double> pose_zero_calibration_{};
 };

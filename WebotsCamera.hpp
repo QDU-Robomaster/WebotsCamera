@@ -2,7 +2,7 @@
 
 // clang-format off
 /* === MODULE MANIFEST V2 ===
-module_description: Webots simulated camera publisher (BGR8)
+module_description: Webots 仿真相机发布模块（BGR8）
 constructor_args:
   - runtime:
       device_name: "camera"
@@ -10,6 +10,8 @@ constructor_args:
       exposure: 1.0
       gain: 0.0
       pose_def_name: "camera"
+      image_topic_name: "camera_image"
+      imu_topic_name: "camera_imu"
 template_args:
   - Info:
       width: 1280

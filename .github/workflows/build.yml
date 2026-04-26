@@ -22,11 +22,11 @@ jobs:
         with:
           path: Modules/${{ env.XR_MODULE_NAME }}
 
-      - name: Checkout matching CameraBase branch to ./Modules/CameraBase
+      - name: Checkout CameraBase master to ./Modules/CameraBase
         uses: actions/checkout@v4
         with:
           repository: QDU-Robomaster/CameraBase
-          ref: feat/camerainfo-staticinfo-cxx20-20260420
+          ref: master
           path: Modules/CameraBase
 
       - name: Create main.cpp
@@ -124,7 +124,9 @@ jobs:
                   fps: 30
                   exposure: 1.0
                   gain: 0.0
+                  pose_def_name: camera
                   image_topic_name: image_frame
+                  imu_topic_name: camera_imu
           EOF
           cat User/xrobot.yaml
 

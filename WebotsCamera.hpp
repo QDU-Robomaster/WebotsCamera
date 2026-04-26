@@ -591,8 +591,8 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
       return LibXR::Position<float>(0.0f, 0.0f, 0.0f);
     }
 
-    const LibXR::Position<double> raw_vector(raw_xyz[0], raw_xyz[1], raw_xyz[2]);
-    const LibXR::Position<double> published_vector =
+    const Eigen::Matrix<double, 3, 1> raw_vector(raw_xyz[0], raw_xyz[1], raw_xyz[2]);
+    const Eigen::Matrix<double, 3, 1> published_vector =
         pose_zero_calibration_.transpose() * raw_vector;
     return LibXR::Position<float>(static_cast<float>(published_vector.x()),
                                   static_cast<float>(published_vector.y()),

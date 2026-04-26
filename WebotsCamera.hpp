@@ -50,7 +50,9 @@ depends:
 #include "thread.hpp"
 #include "transform.hpp"
 
+#include <webots/Accelerometer.hpp>
 #include <webots/Camera.hpp>
+#include <webots/Gyro.hpp>
 #include <webots/Node.hpp>
 #include <webots/Robot.hpp>
 #include <webots/Supervisor.hpp>
@@ -63,7 +65,7 @@ extern webots::Robot* _libxr_webots_robot_handle;
  * 该模块负责四件事：
  * 1. 从 Webots Camera 取出原始 BGRA 图像；
  * 2. 按目标 fps 把发布节奏量化到世界步长；
- * 3. 从 supervisor 读取相机 pose，并由连续 pose 估计 motion；
+ * 3. 从 supervisor 读取相机 pose，并从 world 里的 IMU 设备读取真实运动量；
  * 4. 发布 imu，再把图像写入 `CameraBase::ImageFrame` 并交给已注册的图像 sink。
  */
 template <CameraTypes::CameraInfo CameraInfoV>
@@ -100,6 +102,12 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
     LibXR::Position<float> linear_acceleration{};
   };
 
+  struct ImuSensorNames
+  {
+    std::string gyro;
+    std::string accelerometer;
+  };
+
   struct RuntimeParam
   {
     // Webots Camera 设备名。
@@ -131,9 +139,11 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
     InitRobot();
     InitCamera();
     InitSupervisor(hw);
+    InitImuSensors();
     ValidateCameraGeometry();
     ApplyEnvOverridesOnStartup();
     ConfigureSamplingOnStartup();
+    EnableImuSensors();
     ApplyExposure();
     WarnUnsupportedGainIfNeeded();
     StartCaptureThread();
@@ -154,6 +164,7 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
       cam_->disable();
       cam_ = nullptr;
     }
+    DisableImuSensors();
 
     XR_LOG_INFO("WebotsCamera destroyed!");
   }
@@ -176,7 +187,11 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
     runtime_ = std::move(next);
     if (pose_def_changed)
     {
+      DisableImuSensors();
       cam_node_ = nullptr;
+      pose_zero_calibrated_ = false;
+      BindImuSensors();
+      EnableImuSensors();
     }
 
     ApplyRuntimeParameters();
@@ -275,6 +290,59 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
     }
   }
 
+  std::string ResolveImuSensorPrefix() const
+  {
+    if (!runtime_.pose_def_name.empty())
+    {
+      return runtime_.pose_def_name;
+    }
+
+    const char* device_name = SafeCStr(runtime_.device_name);
+    if (device_name[0] != '\0')
+    {
+      return std::string(device_name);
+    }
+
+    return "camera";
+  }
+
+  ImuSensorNames BuildImuSensorNames() const
+  {
+    const std::string prefix = ResolveImuSensorPrefix();
+    return ImuSensorNames{
+        .gyro = prefix + "_gyro",
+        .accelerometer = prefix + "_accelerometer",
+    };
+  }
+
+  void BindImuSensors()
+  {
+    imu_sensor_names_ = BuildImuSensorNames();
+    gyro_ = robot_->getGyro(imu_sensor_names_.gyro);
+    accelerometer_ = robot_->getAccelerometer(imu_sensor_names_.accelerometer);
+
+    if (gyro_ == nullptr)
+    {
+      XR_LOG_ERROR("WebotsCamera: gyro '%s' not found in world.",
+                   imu_sensor_names_.gyro.c_str());
+      throw std::runtime_error("WebotsCamera: gyro device not found");
+    }
+    if (accelerometer_ == nullptr)
+    {
+      XR_LOG_ERROR("WebotsCamera: accelerometer '%s' not found in world.",
+                   imu_sensor_names_.accelerometer.c_str());
+      throw std::runtime_error("WebotsCamera: accelerometer device not found");
+    }
+  }
+
+  void InitImuSensors()
+  {
+    BindImuSensors();
+    XR_LOG_INFO("WebotsCamera: IMU devices gyro=%s accelerometer=%s",
+                imu_sensor_names_.gyro.c_str(),
+                imu_sensor_names_.accelerometer.c_str());
+  }
+
   void ValidateCameraGeometry() const
   {
     const uint32_t actual_width = static_cast<uint32_t>(cam_->getWidth());
@@ -300,6 +368,32 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
     publish_interval_steps_ = ComputePublishIntervalSteps(sample_period_ms_, time_step_ms_);
     last_publish_bucket_ = UINT64_MAX;
     cam_->enable(sample_period_ms_);
+  }
+
+  void EnableImuSensors()
+  {
+    if (gyro_ != nullptr)
+    {
+      gyro_->enable(time_step_ms_);
+    }
+    if (accelerometer_ != nullptr)
+    {
+      accelerometer_->enable(time_step_ms_);
+    }
+  }
+
+  void DisableImuSensors()
+  {
+    if (gyro_ != nullptr)
+    {
+      gyro_->disable();
+      gyro_ = nullptr;
+    }
+    if (accelerometer_ != nullptr)
+    {
+      accelerometer_->disable();
+      accelerometer_ = nullptr;
+    }
   }
 
   void InitSupervisor(LibXR::HardwareContainer& hw)
@@ -450,31 +544,6 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
     gimbal_rotation_topic_.Publish(rotation);
   }
 
-  static float WrapAngleDelta(float current, float previous)
-  {
-    constexpr float kPi = 3.14159265358979323846f;
-    constexpr float kTwoPi = 2.0f * kPi;
-
-    float delta = current - previous;
-    while (delta > kPi)
-    {
-      delta -= kTwoPi;
-    }
-    while (delta < -kPi)
-    {
-      delta += kTwoPi;
-    }
-    return delta;
-  }
-
-  void ResetMotionWarmup(const PoseSample& pose)
-  {
-    last_pose_timestamp_us_ = static_cast<uint64_t>(pose.timestamp);
-    last_pose_translation_ = pose.translation;
-    last_pose_rotation_ = pose.rotation;
-    last_linear_velocity_valid_ = false;
-  }
-
   PoseSample ReadCameraPoseSample(LibXR::MicrosecondTimestamp timestamp)
   {
     PoseSample pose{};
@@ -514,63 +583,28 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
     return pose;
   }
 
-  bool TryReadCameraMotionSample(const PoseSample& pose, MotionSample& motion)
+  bool ReadImuMotionSample(MotionSample& motion) const
   {
-    const uint64_t current_timestamp_us = static_cast<uint64_t>(pose.timestamp);
-    if (!last_pose_valid_)
+    if (gyro_ == nullptr || accelerometer_ == nullptr)
     {
-      last_pose_valid_ = true;
-      ResetMotionWarmup(pose);
       return false;
     }
 
-    if (current_timestamp_us <= last_pose_timestamp_us_)
+    const double* angular_velocity = gyro_->getValues();
+    const double* linear_acceleration = accelerometer_->getValues();
+    if (angular_velocity == nullptr || linear_acceleration == nullptr)
     {
-      ResetMotionWarmup(pose);
       return false;
     }
-
-    const double dt =
-        static_cast<double>(current_timestamp_us - last_pose_timestamp_us_) / 1000000.0;
-    if (dt <= 0.0)
-    {
-      ResetMotionWarmup(pose);
-      return false;
-    }
-
-    // Webots 这条链路里，pose 与图像是同一线程采样的，所以这里直接用连续
-    // pose 差分估计角速度与线加速度，不再依赖节点原生 velocity 字段。
-    const LibXR::EulerAngle<float> current_euler = pose.rotation.ToEulerAngle();
-    const LibXR::EulerAngle<float> last_euler = last_pose_rotation_.ToEulerAngle();
-    const float dt_f = static_cast<float>(dt);
-    const LibXR::Position<float> current_linear_velocity(
-        static_cast<float>((pose.translation.x() - last_pose_translation_.x()) / dt),
-        static_cast<float>((pose.translation.y() - last_pose_translation_.y()) / dt),
-        static_cast<float>((pose.translation.z() - last_pose_translation_.z()) / dt));
 
     motion.angular_velocity = LibXR::Position<float>(
-        WrapAngleDelta(current_euler.Roll(), last_euler.Roll()) / dt_f,
-        WrapAngleDelta(current_euler.Pitch(), last_euler.Pitch()) / dt_f,
-        WrapAngleDelta(current_euler.Yaw(), last_euler.Yaw()) / dt_f);
-
-    if (last_linear_velocity_valid_)
-    {
-      motion.linear_acceleration = LibXR::Position<float>(
-          static_cast<float>((current_linear_velocity.x() - last_linear_velocity_.x()) / dt),
-          static_cast<float>((current_linear_velocity.y() - last_linear_velocity_.y()) / dt),
-          static_cast<float>((current_linear_velocity.z() - last_linear_velocity_.z()) / dt));
-    }
-    else
-    {
-      // 第一份有效速度还没有历史项可差分，线加速度先置零。
-      motion.linear_acceleration = LibXR::Position<float>(0.0f, 0.0f, 0.0f);
-    }
-
-    last_pose_timestamp_us_ = current_timestamp_us;
-    last_pose_translation_ = pose.translation;
-    last_pose_rotation_ = pose.rotation;
-    last_linear_velocity_ = current_linear_velocity;
-    last_linear_velocity_valid_ = true;
+        static_cast<float>(angular_velocity[0]),
+        static_cast<float>(angular_velocity[1]),
+        static_cast<float>(angular_velocity[2]));
+    motion.linear_acceleration = LibXR::Position<float>(
+        static_cast<float>(linear_acceleration[0]),
+        static_cast<float>(linear_acceleration[1]),
+        static_cast<float>(linear_acceleration[2]));
     return true;
   }
 
@@ -633,12 +667,12 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
         continue;
       }
 
-      // 发布顺序固定为：仿真节流 -> pose -> motion -> image -> sink commit。
+      // 发布顺序固定为：仿真节流 -> pose -> imu -> image -> sink commit。
       const auto timestamp = self->CurrentSimTimeUs();
       auto pose = self->ReadCameraPoseSample(timestamp);
       self->PublishRotationTopic(pose);
       MotionSample motion{};
-      if (!self->TryReadCameraMotionSample(pose, motion))
+      if (!self->ReadImuMotionSample(motion))
       {
         continue;
       }
@@ -695,8 +729,11 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
 
   webots::Robot* robot_{};
   webots::Camera* cam_ = nullptr;
+  webots::Gyro* gyro_ = nullptr;
+  webots::Accelerometer* accelerometer_ = nullptr;
   webots::Node* cam_node_ = nullptr;
   webots::Supervisor* supervisor_ = nullptr;
+  ImuSensorNames imu_sensor_names_{};
   int time_step_ms_ = 0;
   int sample_period_ms_ = 33;
   int publish_interval_steps_ = 1;
@@ -705,12 +742,6 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
   LibXR::Thread capture_thread_{};
   int fail_count_ = 0;
   uint64_t last_publish_bucket_ = UINT64_MAX;
-  bool last_pose_valid_ = false;
-  uint64_t last_pose_timestamp_us_ = 0;
-  LibXR::Position<float> last_pose_translation_{0.0f, 0.0f, 0.0f};
-  LibXR::Quaternion<float> last_pose_rotation_{0.0f, 0.0f, 0.0f, 1.0f};
-  bool last_linear_velocity_valid_ = false;
-  LibXR::Position<float> last_linear_velocity_{0.0f, 0.0f, 0.0f};
   bool pose_zero_calibrated_ = false;
   LibXR::RotationMatrix<double> pose_zero_calibration_{};
 };

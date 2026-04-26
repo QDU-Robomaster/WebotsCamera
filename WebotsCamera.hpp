@@ -583,9 +583,25 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
     return pose;
   }
 
+  LibXR::Position<float> RotateCameraNodeVectorToPublishedFrame(
+      const double* raw_xyz) const
+  {
+    if (raw_xyz == nullptr)
+    {
+      return LibXR::Position<float>(0.0f, 0.0f, 0.0f);
+    }
+
+    const LibXR::Position<double> raw_vector(raw_xyz[0], raw_xyz[1], raw_xyz[2]);
+    const LibXR::Position<double> published_vector =
+        pose_zero_calibration_.transpose() * raw_vector;
+    return LibXR::Position<float>(static_cast<float>(published_vector.x()),
+                                  static_cast<float>(published_vector.y()),
+                                  static_cast<float>(published_vector.z()));
+  }
+
   bool ReadImuMotionSample(MotionSample& motion) const
   {
-    if (gyro_ == nullptr || accelerometer_ == nullptr)
+    if (gyro_ == nullptr || accelerometer_ == nullptr || !pose_zero_calibrated_)
     {
       return false;
     }
@@ -597,14 +613,12 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
       return false;
     }
 
-    motion.angular_velocity = LibXR::Position<float>(
-        static_cast<float>(angular_velocity[0]),
-        static_cast<float>(angular_velocity[1]),
-        static_cast<float>(angular_velocity[2]));
-    motion.linear_acceleration = LibXR::Position<float>(
-        static_cast<float>(linear_acceleration[0]),
-        static_cast<float>(linear_acceleration[1]),
-        static_cast<float>(linear_acceleration[2]));
+    // Webots 传感器原始值位于 camera node 局部轴；这里统一旋到当前发布的
+    // SP/BMI088 风格姿态帧，确保 rotation / gyro / accel 三者坐标语义一致。
+    motion.angular_velocity =
+        RotateCameraNodeVectorToPublishedFrame(angular_velocity);
+    motion.linear_acceleration =
+        RotateCameraNodeVectorToPublishedFrame(linear_acceleration);
     return true;
   }
 

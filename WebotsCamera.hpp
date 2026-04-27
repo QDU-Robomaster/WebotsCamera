@@ -85,7 +85,6 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
   using SensorSyncCmd = typename Base::SensorSyncCmd;
 
   static inline constexpr CameraInfo camera_info = Base::camera_info;
-  static constexpr const char* kDefaultTopicPrefix = "camera";
   static constexpr int channel_count = 3;
   static constexpr int frame_width = static_cast<int>(camera_info.width);
   static constexpr int frame_height = static_cast<int>(camera_info.height);
@@ -129,17 +128,19 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
 
   struct RuntimeParam
   {
-    // Webots Camera 设备名。
+    // Webots Camera 设备名，同时也是原始 topic 前缀；不能为空。
     const char* device_name = "camera";
 
     // 目标发布频率。最终会被量化到世界步长上。
     int fps = 30;
 
-    // Webots 原生支持曝光，不支持 gain。
+    // Webots 原生支持曝光。
     double exposure = 1.0;
+
+    // Webots 不支持 gain；非零输入会被直接忽略。
     double gain = 0.0;
 
-    // 用于 supervisor 查询相机位姿的 DEF 名字。
+    // 用于 supervisor 查询相机位姿，同时也是 IMU 设备名前缀；不能为空。
     std::string pose_def_name = "camera";
 
     // 图像与 imu 的原始输出名，供同步器和其他消费者复用。
@@ -149,11 +150,12 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
 
   explicit WebotsCamera(LibXR::HardwareContainer& hw, LibXR::ApplicationManager& app,
                         RuntimeParam runtime)
-      : Base(hw, runtime.device_name, runtime.image_topic_name, runtime.imu_topic_name),
+      : Base(hw,
+             RequireNonEmptyCStr(runtime.device_name, "device_name"),
+             RequireNonEmptyCStr(runtime.image_topic_name, "image_topic_name"),
+             RequireNonEmptyCStr(runtime.imu_topic_name, "imu_topic_name")),
         runtime_(std::move(runtime)),
-        device_topic_prefix_((runtime.device_name != nullptr && runtime.device_name[0] != '\0')
-                                 ? runtime.device_name
-                                 : kDefaultTopicPrefix),
+        device_topic_prefix_(RequireNonEmptyCStr(runtime_.device_name, "device_name")),
         gyro_topic_name_(device_topic_prefix_ + "_gyro"),
         accl_topic_name_(device_topic_prefix_ + "_accl"),
         quat_topic_name_(device_topic_prefix_ + "_quat"),
@@ -171,16 +173,22 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
   {
     XR_LOG_INFO("Starting WebotsCamera!");
 
+    RequireNonEmptyString(runtime_.pose_def_name, "pose_def_name");
+    if (runtime_.fps <= 0)
+    {
+      XR_LOG_ERROR("WebotsCamera: runtime.fps must be positive, got %d", runtime_.fps);
+      throw std::invalid_argument("WebotsCamera: runtime.fps must be positive");
+    }
+
     InitRobot();
     InitCamera();
     InitSupervisor(hw);
     InitImuSensors();
     ValidateCameraGeometry();
-    ApplyEnvOverridesOnStartup();
     ConfigureSamplingOnStartup();
     EnableImuSensors();
     ApplyExposure();
-    WarnUnsupportedGainIfNeeded();
+    WarnAndClearUnsupportedGainIfNeeded();
     sensor_sync_cmd_sub_.StartWaiting();
     StartCaptureThread();
 
@@ -205,34 +213,6 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
     XR_LOG_INFO("WebotsCamera destroyed!");
   }
 
-  void SetRuntimeParam(const RuntimeParam& runtime)
-  {
-    const bool pose_def_changed = runtime_.pose_def_name != runtime.pose_def_name;
-    const bool device_changed = !SameCStr(runtime_.device_name, runtime.device_name);
-
-    RuntimeParam next = runtime;
-    if (device_changed)
-    {
-      XR_LOG_WARN(
-          "WebotsCamera: device_name runtime change '%s' -> '%s' requires reconstruction. "
-          "Keeping current camera binding.",
-          SafeCStr(runtime_.device_name), SafeCStr(runtime.device_name));
-      next.device_name = runtime_.device_name;
-    }
-
-    runtime_ = std::move(next);
-    if (pose_def_changed)
-    {
-      DisableImuSensors();
-      cam_node_ = nullptr;
-      pose_zero_calibrated_ = false;
-      BindImuSensors();
-      EnableImuSensors();
-    }
-
-    ApplyRuntimeParameters();
-  }
-
   void OnMonitor() override {}
 
   void SetExposure(double exposure) override
@@ -244,26 +224,34 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
   void SetGain(double gain) override
   {
     runtime_.gain = gain;
-    WarnUnsupportedGainIfNeeded();
+    WarnAndClearUnsupportedGainIfNeeded();
   }
 
  private:
   // ---- 基础工具 ----
 
-  static const char* SafeCStr(const char* text) { return text != nullptr ? text : ""; }
-
-  static bool SameCStr(const char* lhs, const char* rhs)
+  static const char* RequireNonEmptyCStr(const char* text, const char* field_name)
   {
-    return std::strcmp(SafeCStr(lhs), SafeCStr(rhs)) == 0;
+    if (text != nullptr && text[0] != '\0')
+    {
+      return text;
+    }
+    XR_LOG_ERROR("WebotsCamera: runtime.%s must not be empty", field_name);
+    throw std::invalid_argument("WebotsCamera: required runtime c-string is empty");
   }
 
-  static int FpsToPeriodMs(int fps, int fallback_ms)
+  static void RequireNonEmptyString(const std::string& text, const char* field_name)
   {
-    if (fps <= 0)
+    if (!text.empty())
     {
-      return fallback_ms;
+      return;
     }
+    XR_LOG_ERROR("WebotsCamera: runtime.%s must not be empty", field_name);
+    throw std::invalid_argument("WebotsCamera: required runtime string is empty");
+  }
 
+  static int FpsToPeriodMs(int fps)
+  {
     const double period = 1000.0 / static_cast<double>(fps);
     const int ms = static_cast<int>(std::lround(period));
     return ms < 1 ? 1 : ms;
@@ -273,29 +261,6 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
   {
     return std::max(1, static_cast<int>(std::lround(static_cast<double>(period_ms) /
                                                     static_cast<double>(time_step_ms))));
-  }
-
-  static bool ReadEnvDouble(const char* name, double& value)
-  {
-    if (name == nullptr)
-    {
-      return false;
-    }
-    const char* env = std::getenv(name);
-    if (env == nullptr || env[0] == '\0')
-    {
-      return false;
-    }
-
-    char* end = nullptr;
-    const double parsed = std::strtod(env, &end);
-    if (end == env || !std::isfinite(parsed))
-    {
-      return false;
-    }
-
-    value = parsed;
-    return true;
   }
 
   // ---- 启动与运行时参数 ----
@@ -326,37 +291,13 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
     }
   }
 
-  std::string ResolveImuSensorPrefix() const
-  {
-    // 优先用 pose_def_name，对齐 supervisor 查询与 IMU 设备命名。
-    if (!runtime_.pose_def_name.empty())
-    {
-      return runtime_.pose_def_name;
-    }
-
-    const char* device_name = SafeCStr(runtime_.device_name);
-    if (device_name[0] != '\0')
-    {
-      return std::string(device_name);
-    }
-
-    return "camera";
-  }
-
-  ImuSensorNames BuildImuSensorNames() const
-  {
-    // 约定 world 里的 IMU 设备名为 <prefix>_gyro / <prefix>_accelerometer。
-    const std::string prefix = ResolveImuSensorPrefix();
-    return ImuSensorNames{
-        .gyro = prefix + "_gyro",
-        .accelerometer = prefix + "_accelerometer",
-    };
-  }
-
   void BindImuSensors()
   {
-    // 这里只做设备绑定，不做 enable，便于运行时在 pose_def 切换后重绑。
-    imu_sensor_names_ = BuildImuSensorNames();
+    // 这里只做设备绑定，不做 enable；初始化路径可直接复用这一段。
+    imu_sensor_names_ = ImuSensorNames{
+        .gyro = runtime_.pose_def_name + "_gyro",
+        .accelerometer = runtime_.pose_def_name + "_accelerometer",
+    };
     gyro_ = robot_->getGyro(imu_sensor_names_.gyro);
     accelerometer_ = robot_->getAccelerometer(imu_sensor_names_.accelerometer);
 
@@ -407,9 +348,8 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
   {
     // Camera 每个 world step 都使能，真正的发图频率由本地图像调度器控制。
     camera_sample_period_ms_ = time_step_ms_;
-    base_image_interval_steps_ =
-        ComputePublishIntervalSteps(FpsToPeriodMs(runtime_.fps, time_step_ms_),
-                                    time_step_ms_);
+    base_image_interval_steps_ = ComputePublishIntervalSteps(FpsToPeriodMs(runtime_.fps),
+                                                             time_step_ms_);
     ResetImageSchedule();
     last_processed_step_ = std::numeric_limits<uint64_t>::max();
     cam_->enable(camera_sample_period_ms_);
@@ -448,25 +388,6 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
     supervisor_ = hw.FindOrExit<webots::Supervisor>({"supervisor"});
   }
 
-  void ApplyEnvOverridesOnStartup()
-  {
-    // 目前仅保留曝光 env 覆盖，方便做 detector/tracker A/B。
-    double exposure = runtime_.exposure;
-    if (ReadEnvDouble("XR_WEBOTS_CAMERA_EXPOSURE", exposure))
-    {
-      if (exposure >= 0.0)
-      {
-        XR_LOG_INFO("WebotsCamera: exposure env override %.3f -> %.3f",
-                    runtime_.exposure, exposure);
-        runtime_.exposure = exposure;
-      }
-      else
-      {
-        XR_LOG_WARN("WebotsCamera: ignored negative exposure override %.3f", exposure);
-      }
-    }
-  }
-
   void StartCaptureThread()
   {
     // 采集线程把 pose / imu / image 串成同一条发布时间线。
@@ -474,34 +395,6 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
     capture_thread_.Create(this, CaptureThreadMain, "WebotsCameraThread",
                            static_cast<size_t>(1024 * 128),
                            LibXR::Thread::Priority::REALTIME);
-  }
-
-  void ApplyRuntimeParameters()
-  {
-    if (cam_ == nullptr)
-    {
-      return;
-    }
-
-    ReconfigureSampling();
-    ApplyExposure();
-    WarnUnsupportedGainIfNeeded();
-  }
-
-  void ReconfigureSampling()
-  {
-    if (camera_sample_period_ms_ != time_step_ms_)
-    {
-      camera_sample_period_ms_ = time_step_ms_;
-      cam_->disable();
-      cam_->enable(camera_sample_period_ms_);
-    }
-
-    base_image_interval_steps_ =
-        ComputePublishIntervalSteps(FpsToPeriodMs(runtime_.fps, time_step_ms_),
-                                    time_step_ms_);
-    ResetImageSchedule();
-    last_processed_step_ = std::numeric_limits<uint64_t>::max();
   }
 
   void ApplyExposure()
@@ -516,7 +409,7 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
     XR_LOG_INFO("WebotsCamera: exposure=%.3f applied", runtime_.exposure);
   }
 
-  void WarnUnsupportedGainIfNeeded() const
+  void WarnAndClearUnsupportedGainIfNeeded()
   {
     if (runtime_.gain == 0.0)
     {
@@ -524,9 +417,10 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
     }
 
     XR_LOG_WARN(
-        "WebotsCamera: gain=%.3f requested, but not supported by Webots Camera. "
-        "Value recorded only.",
+        "WebotsCamera: gain=%.3f requested, but Webots Camera does not support gain. "
+        "Request ignored.",
         runtime_.gain);
+    runtime_.gain = 0.0;
   }
 
   // ---- 仿真时间与节流 ----

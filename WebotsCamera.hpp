@@ -98,7 +98,8 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
 
   struct PoseSample
   {
-    // 当前发布时刻的相机姿态。rotation 使用对外发布的 SP/BMI088 风格帧。
+    // 当前发布时刻的相机姿态。rotation 表示对外发布坐标系相对 world 的姿态四元数。
+    // 该发布坐标系固定为右手系：x 向右、y 向前、z 向上。
     LibXR::MicrosecondTimestamp timestamp{};
     LibXR::Quaternion<float> rotation{};
     LibXR::Position<float> translation{};
@@ -106,7 +107,8 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
 
   struct MotionSample
   {
-    // 与 PoseSample 同帧下的运动量，坐标语义必须和 rotation_wxyz 一致。
+    // 与 PoseSample 同帧下的运动量，分量都落在同一发布坐标系下：
+    // x 向右、y 向前、z 向上；角速度正方向遵循各轴右手定则。
     LibXR::Position<float> angular_velocity{};
     LibXR::Position<float> linear_acceleration{};
   };
@@ -615,8 +617,8 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
   void PublishRotationTopic(const PoseSample& pose)
   {
     const LibXR::EulerAngle<float> eulr = pose.rotation.ToEulerAngle();
-    XR_LOG_DEBUG("WebotsCamera: camera eulr: %.3f, %.3f, %.3f", eulr.Roll(),
-                 eulr.Pitch(), eulr.Yaw());
+    XR_LOG_DEBUG("WebotsCamera: camera euler roll_x=%.3f pitch_y=%.3f yaw_z=%.3f",
+                 eulr.Roll(), eulr.Pitch(), eulr.Yaw());
     // 这个 topic 只发布已经过零位标定后的外部语义姿态，不暴露原始 camera node 姿态。
     auto rotation = pose.rotation;
     gimbal_rotation_topic_.Publish(rotation);
@@ -703,10 +705,11 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
         r9_cam[0], r9_cam[1], r9_cam[2], r9_cam[3], r9_cam[4], r9_cam[5],
         r9_cam[6], r9_cam[7], r9_cam[8]);
 
-    // 目标发布帧采用当前系统已经接受的 SP/BMI088 风格中立姿态语义：
-    // x 向右、y 向前、z 向上。第一次读到相机姿态时冻结一份零位标定矩阵，
-    // 后续所有 rotation / gyro / accel 都以这份标定为准。
-    static const LibXR::RotationMatrix<double> kNeutralGimbalToWorld(
+    // 对外发布的 IMU/姿态坐标系固定定义为右手系：x 向右、y 向前、z 向上。
+    // 这里的中立矩阵表示“零位时该发布坐标系在 world 下的朝向”。
+    // 第一次读到相机姿态时会冻结一份零位标定矩阵，后续所有 rotation /
+    // gyro / accel 都统一使用同一份标定，避免中途切换坐标语义。
+    static const LibXR::RotationMatrix<double> kPublishedFrameNeutralToWorld(
         0.0, 1.0, 0.0,
         -1.0, 0.0, 0.0,
         0.0, 0.0, 1.0);
@@ -714,9 +717,9 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
     {
       pose_zero_calibration_ =
           LibXR::RotationMatrix<double>(camera_rotation_world.transpose() *
-                                        kNeutralGimbalToWorld);
+                                        kPublishedFrameNeutralToWorld);
       pose_zero_calibrated_ = true;
-      XR_LOG_INFO("WebotsCamera captured SP-style pose zero calibration");
+      XR_LOG_INFO("WebotsCamera captured published-frame zero calibration");
     }
 
     const LibXR::Quaternion<double> quat =
@@ -739,8 +742,9 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
     }
 
     const Eigen::Matrix<double, 3, 1> raw_vector(raw_xyz[0], raw_xyz[1], raw_xyz[2]);
-    // pose_zero_calibration_ 是 “camera_node -> published frame” 的零位修正。
-    // 对向量做 transpose 等价于把 raw camera-node 向量旋到当前对外发布帧。
+    // pose_zero_calibration_ 是 “camera node 局部轴 -> 对外发布坐标系” 的零位修正。
+    // 对向量做 transpose，等价于把原始 camera node 局部向量旋到发布坐标系
+    // （x 向右、y 向前、z 向上）下。
     const Eigen::Matrix<double, 3, 1> published_vector =
         pose_zero_calibration_.transpose() * raw_vector;
     return LibXR::Position<float>(static_cast<float>(published_vector.x()),
@@ -763,8 +767,8 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
       return false;
     }
 
-    // Webots 传感器原始值位于 camera node 局部轴；这里统一旋到当前发布的
-    // SP/BMI088 风格姿态帧，确保 rotation / gyro / accel 三者坐标语义一致。
+    // Webots 传感器原始值位于 camera node 局部轴；这里统一旋到对外发布坐标系
+    // （x 向右、y 向前、z 向上），确保 rotation / gyro / accel 三者坐标语义一致。
     motion.angular_velocity =
         RotateCameraNodeVectorToPublishedFrame(angular_velocity);
     motion.linear_acceleration =

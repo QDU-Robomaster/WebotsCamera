@@ -713,6 +713,15 @@ class WebotsCamera : private WebotsCameraNameStorage,
     XR_LOG_WARN("WebotsCamera: getImage returned null.");
   }
 
+  void PublishImageFrame(const SimClockSample& clock)
+  {
+    // 同一帧图像拆成两路输出：
+    // 1. 轻量 image_event，作为主机侧同步基线；
+    // 2. 大图 payload，走共享图像槽位。
+    PublishImageEvent(clock.timestamp, clock.step);
+    PublishImagePayload(clock.timestamp);
+  }
+
   void ReportRepeatedFailureIfNeeded() const
   {
     if (consecutive_fail_count_ > 5)
@@ -742,8 +751,7 @@ class WebotsCamera : private WebotsCameraNameStorage,
     }
 
     AdvanceImageScheduleAfterPublish();
-    PublishImageEvent(clock.timestamp, clock.step);
-    PublishImagePayload(clock.timestamp);
+    PublishImageFrame(clock);
     ReportRepeatedFailureIfNeeded();
   }
 

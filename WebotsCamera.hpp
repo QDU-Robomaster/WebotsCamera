@@ -186,7 +186,6 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
     InitImuSensors();
     ValidateCameraGeometry();
     ConfigureSamplingOnStartup();
-    EnableImuSensors();
     ApplyExposure();
     IgnoreUnsupportedGainRequest();
     sensor_sync_cmd_sub_.StartWaiting();
@@ -202,15 +201,6 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
   ~WebotsCamera()
   {
     running_.store(false);
-
-    if (cam_ != nullptr)
-    {
-      cam_->disable();
-      cam_ = nullptr;
-    }
-    DisableImuSensors();
-
-    XR_LOG_INFO("WebotsCamera destroyed!");
   }
 
   void OnMonitor() override {}
@@ -318,6 +308,14 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
   void InitImuSensors()
   {
     BindImuSensors();
+    if (gyro_ != nullptr)
+    {
+      gyro_->enable(time_step_ms_);
+    }
+    if (accelerometer_ != nullptr)
+    {
+      accelerometer_->enable(time_step_ms_);
+    }
     XR_LOG_INFO("WebotsCamera: IMU devices gyro=%s accelerometer=%s",
                 imu_sensor_names_.gyro.c_str(),
                 imu_sensor_names_.accelerometer.c_str());
@@ -352,34 +350,6 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
     ResetImageSchedule();
     last_processed_step_ = std::numeric_limits<uint64_t>::max();
     cam_->enable(time_step_ms_);
-  }
-
-  void EnableImuSensors()
-  {
-    // IMU 直接按 world basicTimeStep 采样，避免对角速度/加速度再做插值。
-    if (gyro_ != nullptr)
-    {
-      gyro_->enable(time_step_ms_);
-    }
-    if (accelerometer_ != nullptr)
-    {
-      accelerometer_->enable(time_step_ms_);
-    }
-  }
-
-  void DisableImuSensors()
-  {
-    // disable 后把指针清空，避免后续误以为设备仍可读。
-    if (gyro_ != nullptr)
-    {
-      gyro_->disable();
-      gyro_ = nullptr;
-    }
-    if (accelerometer_ != nullptr)
-    {
-      accelerometer_->disable();
-      accelerometer_ = nullptr;
-    }
   }
 
   void InitSupervisor(LibXR::HardwareContainer& hw)

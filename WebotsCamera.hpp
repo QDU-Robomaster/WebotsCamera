@@ -60,15 +60,15 @@ depends:
 
 extern webots::Robot* _libxr_webots_robot_handle;
 
-class WebotsCameraNameStorage
+class WebotsCameraNames
 {
  protected:
-  WebotsCameraNameStorage(const char* device_name, const std::string& pose_def_name,
-                          const char* image_topic_name, const char* imu_topic_name)
-      : device_name_(CopyRequiredCString(device_name, "device_name")),
+  WebotsCameraNames(const std::string& device_name, const std::string& pose_def_name,
+                    const std::string& image_topic_name, const std::string& imu_topic_name)
+      : device_name_(CopyRequiredString(device_name, "device_name")),
         pose_def_name_(CopyRequiredString(pose_def_name, "pose_def_name")),
-        image_topic_name_(CopyRequiredCString(image_topic_name, "image_topic_name")),
-        imu_topic_name_(CopyRequiredCString(imu_topic_name, "imu_topic_name"))
+        image_topic_name_(CopyRequiredString(image_topic_name, "image_topic_name")),
+        imu_topic_name_(CopyRequiredString(imu_topic_name, "imu_topic_name"))
   {
   }
 
@@ -78,16 +78,6 @@ class WebotsCameraNameStorage
   const std::string& ImuTopicNameOwned() const { return imu_topic_name_; }
 
  private:
-  static std::string CopyRequiredCString(const char* text, const char* field_name)
-  {
-    if (text != nullptr && text[0] != '\0')
-    {
-      return text;
-    }
-    XR_LOG_ERROR("WebotsCamera: runtime.%s must not be empty", field_name);
-    throw std::invalid_argument("WebotsCamera: required runtime c-string is empty");
-  }
-
   static std::string CopyRequiredString(const std::string& text, const char* field_name)
   {
     if (!text.empty())
@@ -116,7 +106,7 @@ class WebotsCameraNameStorage
  *    并交给已注册的图像 sink。
  */
 template <CameraTypes::CameraInfo CameraInfoV>
-class WebotsCamera : private WebotsCameraNameStorage,
+class WebotsCamera : private WebotsCameraNames,
                      public LibXR::Application,
                      public CameraBase<CameraInfoV>
 {
@@ -176,7 +166,7 @@ class WebotsCamera : private WebotsCameraNameStorage,
   struct RuntimeParam
   {
     // Webots Camera 设备名，同时也是原始 topic 前缀；不能为空。
-    const char* device_name = "camera";
+    std::string device_name = "camera";
 
     // 目标发布频率。最终会被量化到世界步长上。
     int fps = 30;
@@ -191,29 +181,27 @@ class WebotsCamera : private WebotsCameraNameStorage,
     std::string pose_def_name = "camera";
 
     // 图像与 imu 的原始输出名，供同步器和其他消费者复用。
-    const char* image_topic_name = "camera_image";
-    const char* imu_topic_name = "camera_imu";
+    std::string image_topic_name = "camera_image";
+    std::string imu_topic_name = "camera_imu";
   };
 
   explicit WebotsCamera(LibXR::HardwareContainer& hw, LibXR::ApplicationManager& app,
                         RuntimeParam runtime)
-      : WebotsCameraNameStorage(runtime.device_name, runtime.pose_def_name,
-                                runtime.image_topic_name, runtime.imu_topic_name),
+      : WebotsCameraNames(runtime.device_name, runtime.pose_def_name,
+                          runtime.image_topic_name, runtime.imu_topic_name),
         Base(hw, DeviceNameOwned(), ImageTopicNameOwned(), ImuTopicNameOwned()),
         runtime_(std::move(runtime)),
-        device_topic_prefix_(DeviceNameOwned()),
-        gyro_topic_name_(device_topic_prefix_ + "_gyro"),
-        accl_topic_name_(device_topic_prefix_ + "_accl"),
-        quat_topic_name_(device_topic_prefix_ + "_quat"),
-        image_event_topic_name_(device_topic_prefix_ + "_image_event"),
-        sensor_sync_cmd_topic_name_("sensor_sync_cmd"),
+        gyro_topic_name_(DeviceNameOwned() + "_gyro"),
+        accl_topic_name_(DeviceNameOwned() + "_accl"),
+        quat_topic_name_(DeviceNameOwned() + "_quat"),
+        image_event_topic_name_(DeviceNameOwned() + "_image_event"),
         raw_gyro_topic_(LibXR::Topic::FindOrCreate<GyroStamped>(gyro_topic_name_.c_str())),
         raw_accl_topic_(LibXR::Topic::FindOrCreate<AcclStamped>(accl_topic_name_.c_str())),
         raw_quat_topic_(LibXR::Topic::FindOrCreate<QuatStamped>(quat_topic_name_.c_str())),
         image_event_topic_(
             LibXR::Topic::FindOrCreate<ImageEvent>(image_event_topic_name_.c_str())),
         sensor_sync_cmd_topic_(
-            LibXR::Topic::FindOrCreate<SensorSyncCmd>(sensor_sync_cmd_topic_name_.c_str())),
+            LibXR::Topic::FindOrCreate<SensorSyncCmd>("sensor_sync_cmd")),
         sensor_sync_cmd_sub_(sensor_sync_cmd_topic_),
         robot_(_libxr_webots_robot_handle)
   {
@@ -783,12 +771,10 @@ class WebotsCamera : private WebotsCameraNameStorage,
 
  private:
   RuntimeParam runtime_{};
-  std::string device_topic_prefix_{};
   std::string gyro_topic_name_{};
   std::string accl_topic_name_{};
   std::string quat_topic_name_{};
   std::string image_event_topic_name_{};
-  std::string sensor_sync_cmd_topic_name_{};
   // rotation topic 保持在 gimbal domain，沿用历史消费者的查找路径。
   LibXR::Topic::Domain gimbal_domain_ = LibXR::Topic::Domain("gimbal");
   LibXR::Topic gimbal_rotation_topic_ =

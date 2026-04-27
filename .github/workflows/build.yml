@@ -22,11 +22,11 @@ jobs:
         with:
           path: Modules/${{ env.XR_MODULE_NAME }}
 
-      - name: Checkout matching CameraBase branch to ./Modules/CameraBase
+      - name: Checkout CameraBase master to ./Modules/CameraBase
         uses: actions/checkout@v4
         with:
           repository: QDU-Robomaster/CameraBase
-          ref: feat/camerabase-seqfree-sync-20260427
+          ref: master
           path: Modules/CameraBase
 
       - name: Create main.cpp

@@ -597,7 +597,7 @@ class WebotsCamera : private WebotsCameraNameStorage,
     // 这里的中立矩阵表示“零位时该发布坐标系在 world 下的朝向”。
     // 第一次读到相机姿态时会冻结一份零位标定矩阵，后续所有 rotation /
     // gyro / accel 都统一使用同一份标定，避免中途切换坐标语义。
-    static const LibXR::RotationMatrix<double> kPublishedFrameNeutralToWorld(
+    static const LibXR::RotationMatrix<double> published_frame_neutral_to_world(
         0.0, 1.0, 0.0,
         -1.0, 0.0, 0.0,
         0.0, 0.0, 1.0);
@@ -605,7 +605,7 @@ class WebotsCamera : private WebotsCameraNameStorage,
     {
       pose_zero_calibration_ =
           LibXR::RotationMatrix<double>(camera_rotation_world.transpose() *
-                                        kPublishedFrameNeutralToWorld);
+                                        published_frame_neutral_to_world);
       pose_zero_calibrated_ = true;
       XR_LOG_INFO("WebotsCamera captured published-frame zero calibration");
     }

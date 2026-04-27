@@ -568,8 +568,8 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
   {
     image_schedule_inited_ = false;
     next_image_step_ = 0;
-    pending_sync_cmd_id_ = 0;
-    scheduled_sync_cmd_id_ = 0;
+    probe_pending_ = false;
+    probe_scheduled_ = false;
   }
 
   void EnsureImageSchedule(uint64_t sim_step)
@@ -585,24 +585,22 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
 
   bool IsImageDueThisStep(uint64_t sim_step) const { return sim_step >= next_image_step_; }
 
-  void TrySchedulePendingSyncCmd()
+  void TrySchedulePendingSyncProbe()
   {
-    if (!image_schedule_inited_ || pending_sync_cmd_id_ == 0 || scheduled_sync_cmd_id_ != 0)
+    if (!image_schedule_inited_ || !probe_pending_ || probe_scheduled_)
     {
       return;
     }
 
     next_image_step_ += static_cast<uint64_t>(base_publish_interval_steps_);
-    scheduled_sync_cmd_id_ = pending_sync_cmd_id_;
-    pending_sync_cmd_id_ = 0;
+    probe_scheduled_ = true;
+    probe_pending_ = false;
   }
 
-  uint32_t ConsumeCurrentImageSyncCmdId()
+  void ConsumeCurrentImageProbeFlag()
   {
-    const uint32_t sync_cmd_id = scheduled_sync_cmd_id_;
-    scheduled_sync_cmd_id_ = 0;
+    probe_scheduled_ = false;
     next_image_step_ += static_cast<uint64_t>(base_publish_interval_steps_);
-    return sync_cmd_id;
   }
 
   // ---- Pose / Motion 采样 ----
@@ -635,22 +633,17 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
 
     const SensorSyncCmd cmd = sensor_sync_cmd_sub_.GetData();
     sensor_sync_cmd_sub_.StartWaiting();
-    if (cmd.cmd_id == 0)
-    {
-      return;
-    }
-
-    pending_sync_cmd_id_ = cmd.cmd_id;
-    TrySchedulePendingSyncCmd();
-    XR_LOG_INFO("WebotsCamera: accepted sensor_sync_cmd id=%u", cmd.cmd_id);
+    (void)cmd;
+    probe_pending_ = true;
+    TrySchedulePendingSyncProbe();
+    XR_LOG_INFO("WebotsCamera: accepted sensor_sync_cmd");
   }
 
   void PublishRawImu(const PoseSample& pose, const MotionSample& motion,
-                     LibXR::MicrosecondTimestamp timestamp, uint32_t sequence)
+                     LibXR::MicrosecondTimestamp timestamp)
   {
     GyroStamped gyro{
         .sensor_timestamp_us = static_cast<uint64_t>(timestamp),
-        .sensor_sequence = sequence,
         .angular_velocity_xyz = {
             motion.angular_velocity[0],
             motion.angular_velocity[1],
@@ -659,7 +652,6 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
     };
     AcclStamped accl{
         .sensor_timestamp_us = static_cast<uint64_t>(timestamp),
-        .sensor_sequence = sequence,
         .linear_acceleration_xyz = {
             motion.linear_acceleration[0],
             motion.linear_acceleration[1],
@@ -668,7 +660,6 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
     };
     QuatStamped quat{
         .sensor_timestamp_us = static_cast<uint64_t>(timestamp),
-        .sensor_sequence = sequence,
         .rotation_wxyz = {
             pose.rotation.w(),
             pose.rotation.x(),
@@ -682,14 +673,11 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
     raw_quat_topic_.Publish(quat);
   }
 
-  void PublishImageEvent(LibXR::MicrosecondTimestamp timestamp, uint64_t sim_step,
-                         uint32_t sync_cmd_id)
+  void PublishImageEvent(LibXR::MicrosecondTimestamp timestamp, uint64_t sim_step)
   {
     ImageEvent event{
         .sensor_timestamp_us = static_cast<uint64_t>(timestamp),
-        .image_sequence = image_sequence_++,
         .sensor_step_index = static_cast<uint32_t>(sim_step),
-        .sync_cmd_id = sync_cmd_id,
     };
     image_event_topic_.Publish(event);
   }
@@ -837,7 +825,7 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
 
       self->EnsureImageSchedule(sim_step);
       self->ApplyPendingSensorSyncCmd();
-      self->TrySchedulePendingSyncCmd();
+      self->TrySchedulePendingSyncProbe();
 
       const auto timestamp = self->CurrentSimTimeUs();
       auto pose = self->ReadCameraPoseSample(timestamp);
@@ -848,15 +836,15 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
         continue;
       }
 
-      self->PublishRawImu(pose, motion, timestamp, self->imu_sequence_++);
+      self->PublishRawImu(pose, motion, timestamp);
 
       if (!self->IsImageDueThisStep(sim_step))
       {
         continue;
       }
 
-      const uint32_t sync_cmd_id = self->ConsumeCurrentImageSyncCmdId();
-      self->PublishImageEvent(timestamp, sim_step, sync_cmd_id);
+      self->ConsumeCurrentImageProbeFlag();
+      self->PublishImageEvent(timestamp, sim_step);
 
       const unsigned char* rgba = self->cam_->getImage();
       if (rgba != nullptr)
@@ -908,12 +896,10 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
   std::atomic<bool> running_{false};
   LibXR::Thread capture_thread_{};
   int fail_count_ = 0;
-  uint32_t imu_sequence_{0};
-  uint32_t image_sequence_{0};
   uint64_t last_processed_step_ = std::numeric_limits<uint64_t>::max();
   uint64_t next_image_step_{0};
-  uint32_t pending_sync_cmd_id_{0};
-  uint32_t scheduled_sync_cmd_id_{0};
+  bool probe_pending_{false};
+  bool probe_scheduled_{false};
   bool image_schedule_inited_{false};
   bool pose_zero_calibrated_ = false;
   // 首帧冻结的零位标定矩阵：把 raw camera node 姿态/向量对齐到外部发布帧。

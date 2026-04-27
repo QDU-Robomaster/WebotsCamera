@@ -11,7 +11,7 @@
 - 图像 payload 走 `CameraBase` 的图像 sink
 - 每发一张图像，额外发布一条轻量 `image_event`
 - 接收一次性 `sensor_sync_cmd` 探针，把**下一次图像周期**从 `N` 拉成 `2N`
-- 探针帧会把 `cmd_id` 回填到 `ImageEvent.sync_cmd_id`
+- 不额外回填 `seq/id`；主机侧通过 `image_event` 的到达时间差识别探针帧
 
 ## 当前语义
 

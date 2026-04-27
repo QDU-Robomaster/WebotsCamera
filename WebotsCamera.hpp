@@ -60,6 +60,51 @@ depends:
 
 extern webots::Robot* _libxr_webots_robot_handle;
 
+class WebotsCameraNameStorage
+{
+ protected:
+  WebotsCameraNameStorage(const char* device_name, const std::string& pose_def_name,
+                          const char* image_topic_name, const char* imu_topic_name)
+      : device_name_(CopyRequiredCString(device_name, "device_name")),
+        pose_def_name_(CopyRequiredString(pose_def_name, "pose_def_name")),
+        image_topic_name_(CopyRequiredCString(image_topic_name, "image_topic_name")),
+        imu_topic_name_(CopyRequiredCString(imu_topic_name, "imu_topic_name"))
+  {
+  }
+
+  const std::string& DeviceNameOwned() const { return device_name_; }
+  const std::string& PoseDefNameOwned() const { return pose_def_name_; }
+  const std::string& ImageTopicNameOwned() const { return image_topic_name_; }
+  const std::string& ImuTopicNameOwned() const { return imu_topic_name_; }
+
+ private:
+  static std::string CopyRequiredCString(const char* text, const char* field_name)
+  {
+    if (text != nullptr && text[0] != '\0')
+    {
+      return text;
+    }
+    XR_LOG_ERROR("WebotsCamera: runtime.%s must not be empty", field_name);
+    throw std::invalid_argument("WebotsCamera: required runtime c-string is empty");
+  }
+
+  static std::string CopyRequiredString(const std::string& text, const char* field_name)
+  {
+    if (!text.empty())
+    {
+      return text;
+    }
+    XR_LOG_ERROR("WebotsCamera: runtime.%s must not be empty", field_name);
+    throw std::invalid_argument("WebotsCamera: required runtime string is empty");
+  }
+
+ private:
+  std::string device_name_{};
+  std::string pose_def_name_{};
+  std::string image_topic_name_{};
+  std::string imu_topic_name_{};
+};
+
 /**
  * @brief Webots 相机模块。
  *
@@ -71,7 +116,9 @@ extern webots::Robot* _libxr_webots_robot_handle;
  *    并交给已注册的图像 sink。
  */
 template <CameraTypes::CameraInfo CameraInfoV>
-class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
+class WebotsCamera : private WebotsCameraNameStorage,
+                     public LibXR::Application,
+                     public CameraBase<CameraInfoV>
 {
  public:
   using Self = WebotsCamera<CameraInfoV>;
@@ -150,12 +197,11 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
 
   explicit WebotsCamera(LibXR::HardwareContainer& hw, LibXR::ApplicationManager& app,
                         RuntimeParam runtime)
-      : Base(hw,
-             RequireNonEmptyCStr(runtime.device_name, "device_name"),
-             RequireNonEmptyCStr(runtime.image_topic_name, "image_topic_name"),
-             RequireNonEmptyCStr(runtime.imu_topic_name, "imu_topic_name")),
+      : WebotsCameraNameStorage(runtime.device_name, runtime.pose_def_name,
+                                runtime.image_topic_name, runtime.imu_topic_name),
+        Base(hw, DeviceNameOwned(), ImageTopicNameOwned(), ImuTopicNameOwned()),
         runtime_(std::move(runtime)),
-        device_topic_prefix_(RequireNonEmptyCStr(runtime_.device_name, "device_name")),
+        device_topic_prefix_(DeviceNameOwned()),
         gyro_topic_name_(device_topic_prefix_ + "_gyro"),
         accl_topic_name_(device_topic_prefix_ + "_accl"),
         quat_topic_name_(device_topic_prefix_ + "_quat"),
@@ -173,7 +219,6 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
   {
     XR_LOG_INFO("Starting WebotsCamera!");
 
-    RequireNonEmptyString(runtime_.pose_def_name, "pose_def_name");
     if (runtime_.fps <= 0)
     {
       XR_LOG_ERROR("WebotsCamera: runtime.fps must be positive, got %d", runtime_.fps);
@@ -193,7 +238,7 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
 
     XR_LOG_PASS(
         "Webots camera enabled: name=%s, capture_period=%d ms, world_dt=%d ms, image_divisor=%d",
-        runtime_.device_name, time_step_ms_, time_step_ms_, base_image_interval_steps_);
+        DeviceNameOwned().c_str(), time_step_ms_, time_step_ms_, base_image_interval_steps_);
 
     app.Register(*this);
   }
@@ -219,26 +264,6 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
 
  private:
   // ---- 基础工具 ----
-
-  static const char* RequireNonEmptyCStr(const char* text, const char* field_name)
-  {
-    if (text != nullptr && text[0] != '\0')
-    {
-      return text;
-    }
-    XR_LOG_ERROR("WebotsCamera: runtime.%s must not be empty", field_name);
-    throw std::invalid_argument("WebotsCamera: required runtime c-string is empty");
-  }
-
-  static void RequireNonEmptyString(const std::string& text, const char* field_name)
-  {
-    if (!text.empty())
-    {
-      return;
-    }
-    XR_LOG_ERROR("WebotsCamera: runtime.%s must not be empty", field_name);
-    throw std::invalid_argument("WebotsCamera: required runtime string is empty");
-  }
 
   static int FpsToPeriodMs(int fps)
   {
@@ -273,10 +298,10 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
 
   void InitCamera()
   {
-    cam_ = robot_->getCamera(runtime_.device_name);
+    cam_ = robot_->getCamera(DeviceNameOwned().c_str());
     if (cam_ == nullptr)
     {
-      XR_LOG_ERROR("Webots Camera '%s' not found!", runtime_.device_name);
+      XR_LOG_ERROR("Webots Camera '%s' not found!", DeviceNameOwned().c_str());
       throw std::runtime_error("WebotsCamera: camera device not found");
     }
   }
@@ -285,8 +310,8 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
   {
     // 这里只做设备绑定，不做 enable；初始化路径可直接复用这一段。
     imu_sensor_names_ = ImuSensorNames{
-        .gyro = runtime_.pose_def_name + "_gyro",
-        .accelerometer = runtime_.pose_def_name + "_accelerometer",
+        .gyro = PoseDefNameOwned() + "_gyro",
+        .accelerometer = PoseDefNameOwned() + "_accelerometer",
     };
     gyro_ = robot_->getGyro(imu_sensor_names_.gyro);
     accelerometer_ = robot_->getAccelerometer(imu_sensor_names_.accelerometer);
@@ -473,7 +498,7 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
     // camera node 通过 supervisor 按 DEF 延迟绑定，允许 world 初始化稍晚完成。
     if (cam_node_ == nullptr && supervisor_ != nullptr)
     {
-      cam_node_ = supervisor_->getFromDef(runtime_.pose_def_name.c_str());
+      cam_node_ = supervisor_->getFromDef(PoseDefNameOwned().c_str());
     }
   }
 

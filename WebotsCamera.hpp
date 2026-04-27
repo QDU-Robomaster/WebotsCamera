@@ -188,13 +188,13 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
     ConfigureSamplingOnStartup();
     EnableImuSensors();
     ApplyExposure();
-    WarnAndClearUnsupportedGainIfNeeded();
+    IgnoreUnsupportedGainRequest();
     sensor_sync_cmd_sub_.StartWaiting();
     StartCaptureThread();
 
     XR_LOG_PASS(
         "Webots camera enabled: name=%s, capture_period=%d ms, world_dt=%d ms, image_divisor=%d",
-        runtime_.device_name, camera_sample_period_ms_, time_step_ms_, base_image_interval_steps_);
+        runtime_.device_name, time_step_ms_, time_step_ms_, base_image_interval_steps_);
 
     app.Register(*this);
   }
@@ -224,7 +224,7 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
   void SetGain(double gain) override
   {
     runtime_.gain = gain;
-    WarnAndClearUnsupportedGainIfNeeded();
+    IgnoreUnsupportedGainRequest();
   }
 
  private:
@@ -347,12 +347,11 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
   void ConfigureSamplingOnStartup()
   {
     // Camera 每个 world step 都使能，真正的发图频率由本地图像调度器控制。
-    camera_sample_period_ms_ = time_step_ms_;
     base_image_interval_steps_ = ComputePublishIntervalSteps(FpsToPeriodMs(runtime_.fps),
                                                              time_step_ms_);
     ResetImageSchedule();
     last_processed_step_ = std::numeric_limits<uint64_t>::max();
-    cam_->enable(camera_sample_period_ms_);
+    cam_->enable(time_step_ms_);
   }
 
   void EnableImuSensors()
@@ -409,7 +408,7 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
     XR_LOG_INFO("WebotsCamera: exposure=%.3f applied", runtime_.exposure);
   }
 
-  void WarnAndClearUnsupportedGainIfNeeded()
+  void IgnoreUnsupportedGainRequest()
   {
     if (runtime_.gain == 0.0)
     {
@@ -508,7 +507,7 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
     }
   }
 
-  void PublishRotationTopic(const PoseSample& pose)
+  void PublishGimbalRotation(const PoseSample& pose)
   {
     const LibXR::EulerAngle<float> eulr = pose.rotation.ToEulerAngle();
     XR_LOG_DEBUG("WebotsCamera: camera euler roll_x=%.3f pitch_y=%.3f yaw_z=%.3f",
@@ -706,6 +705,53 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
     return true;
   }
 
+  void PublishImagePayload(LibXR::MicrosecondTimestamp timestamp)
+  {
+    const unsigned char* rgba = cam_->getImage();
+    if (rgba != nullptr)
+    {
+      (void)WriteAndCommitImage(rgba, timestamp);
+      return;
+    }
+
+    consecutive_fail_count_++;
+    XR_LOG_WARN("WebotsCamera: getImage returned null.");
+  }
+
+  void ReportRepeatedFailureIfNeeded() const
+  {
+    if (consecutive_fail_count_ > 5)
+    {
+      XR_LOG_ERROR("WebotsCamera failed repeatedly (%d)!", consecutive_fail_count_);
+    }
+  }
+
+  void ProcessCaptureStep(const SimClockSample& clock)
+  {
+    InitializeImageScheduleIfNeeded(clock.step);
+    PollSensorSyncProbeCommand();
+
+    const PoseSample pose = ReadCameraPoseSample(clock.timestamp);
+    PublishGimbalRotation(pose);
+
+    MotionSample motion{};
+    if (!ReadImuMotionSample(motion))
+    {
+      return;
+    }
+
+    PublishRawImu(pose, motion, clock.timestamp);
+    if (!ShouldPublishImageAtStep(clock.step))
+    {
+      return;
+    }
+
+    AdvanceImageScheduleAfterPublish();
+    PublishImageEvent(clock.timestamp, clock.step);
+    PublishImagePayload(clock.timestamp);
+    ReportRepeatedFailureIfNeeded();
+  }
+
   // ---- 采集线程 ----
 
   static void CaptureThreadMain(Self* self)
@@ -728,43 +774,7 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
         continue;
       }
 
-      self->InitializeImageScheduleIfNeeded(clock.step);
-      self->PollSensorSyncProbeCommand();
-
-      auto pose = self->ReadCameraPoseSample(clock.timestamp);
-      self->PublishRotationTopic(pose);
-      MotionSample motion{};
-      if (!self->ReadImuMotionSample(motion))
-      {
-        continue;
-      }
-
-      self->PublishRawImu(pose, motion, clock.timestamp);
-
-      if (!self->ShouldPublishImageAtStep(clock.step))
-      {
-        continue;
-      }
-
-      self->AdvanceImageScheduleAfterPublish();
-      self->PublishImageEvent(clock.timestamp, clock.step);
-
-      const unsigned char* rgba = self->cam_->getImage();
-      if (rgba != nullptr)
-      {
-        (void)self->WriteAndCommitImage(rgba, clock.timestamp);
-      }
-      else
-      {
-        self->consecutive_fail_count_++;
-        XR_LOG_WARN("WebotsCamera: getImage returned null.");
-      }
-
-      if (self->consecutive_fail_count_ > 5)
-      {
-        XR_LOG_ERROR("WebotsCamera failed repeatedly (%d)!",
-                     self->consecutive_fail_count_);
-      }
+      self->ProcessCaptureStep(clock);
     }
   }
 
@@ -795,7 +805,6 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
   webots::Supervisor* supervisor_ = nullptr;
   ImuSensorNames imu_sensor_names_{};
   int time_step_ms_ = 0;
-  int camera_sample_period_ms_ = 33;
   int base_image_interval_steps_ = 1;
 
   std::atomic<bool> running_{false};

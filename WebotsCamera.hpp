@@ -66,7 +66,7 @@ extern webots::Robot* _libxr_webots_robot_handle;
  * 该模块负责四件事：
  * 1. 从 Webots Camera 取出原始 BGRA 图像；
  * 2. 每个 world step 发布一组原始 imu（gyro/accl/quat）；
- * 3. 按 divisor/phase 控制图像发布，并单独发出 image_event；
+ * 3. 按基础分频发布图像，并响应一次性 `sensor_sync_cmd` 探针；
  * 4. 从 supervisor 读取相机 pose，把图像写入 `CameraBase::ImageFrame`
  *    并交给已注册的图像 sink。
  */
@@ -82,7 +82,7 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
   using AcclStamped = typename Base::AcclStamped;
   using QuatStamped = typename Base::QuatStamped;
   using ImageEvent = typename Base::ImageEvent;
-  using SyncConfig = typename Base::SyncConfig;
+  using SensorSyncCmd = typename Base::SensorSyncCmd;
 
   static inline constexpr CameraInfo camera_info = Base::camera_info;
   static constexpr int channel_count = 3;
@@ -161,19 +161,15 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
                             ? runtime.device_name
                             : "camera") +
             "_image_event"),
-        sync_config_topic_name_(
-            std::string((runtime.device_name != nullptr && runtime.device_name[0] != '\0')
-                            ? runtime.device_name
-                            : "camera") +
-            "_sync_config"),
+        sensor_sync_cmd_topic_name_("sensor_sync_cmd"),
         raw_gyro_topic_(LibXR::Topic::FindOrCreate<GyroStamped>(gyro_topic_name_.c_str())),
         raw_accl_topic_(LibXR::Topic::FindOrCreate<AcclStamped>(accl_topic_name_.c_str())),
         raw_quat_topic_(LibXR::Topic::FindOrCreate<QuatStamped>(quat_topic_name_.c_str())),
         image_event_topic_(
             LibXR::Topic::FindOrCreate<ImageEvent>(image_event_topic_name_.c_str())),
-        sync_config_topic_(
-            LibXR::Topic::FindOrCreate<SyncConfig>(sync_config_topic_name_.c_str())),
-        sync_config_sub_(sync_config_topic_),
+        sensor_sync_cmd_topic_(
+            LibXR::Topic::FindOrCreate<SensorSyncCmd>(sensor_sync_cmd_topic_name_.c_str())),
+        sensor_sync_cmd_sub_(sensor_sync_cmd_topic_),
         robot_(_libxr_webots_robot_handle)
   {
     XR_LOG_INFO("Starting WebotsCamera!");
@@ -188,13 +184,12 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
     EnableImuSensors();
     ApplyExposure();
     WarnUnsupportedGainIfNeeded();
-    sync_config_sub_.StartWaiting();
+    sensor_sync_cmd_sub_.StartWaiting();
     StartCaptureThread();
 
     XR_LOG_PASS(
-        "Webots camera enabled: name=%s, capture_period=%d ms, world_dt=%d ms, image_divisor=%d phase=%d",
-        runtime_.device_name, sample_period_ms_, time_step_ms_, publish_interval_steps_,
-        publish_phase_steps_);
+        "Webots camera enabled: name=%s, capture_period=%d ms, world_dt=%d ms, image_divisor=%d",
+        runtime_.device_name, sample_period_ms_, time_step_ms_, base_publish_interval_steps_);
 
     app.Register(*this);
   }
@@ -281,20 +276,6 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
   {
     return std::max(1, static_cast<int>(std::lround(static_cast<double>(period_ms) /
                                                     static_cast<double>(time_step_ms))));
-  }
-
-  static SyncConfig SanitizeSyncConfig(SyncConfig config)
-  {
-    if (config.image_divisor_steps == 0)
-    {
-      config.image_divisor_steps = 1;
-    }
-    if (config.image_phase_steps >= config.image_divisor_steps)
-    {
-      config.image_phase_steps =
-          static_cast<uint16_t>(config.image_phase_steps % config.image_divisor_steps);
-    }
-    return config;
   }
 
   static bool ReadEnvDouble(const char* name, double& value)
@@ -427,16 +408,12 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
 
   void ConfigureSamplingOnStartup()
   {
-    // Camera 每个 world step 都使能，真正的发图频率由 divisor/phase 控制。
+    // Camera 每个 world step 都使能，真正的发图频率由本地图像调度器控制。
     sample_period_ms_ = time_step_ms_;
-    sync_config_ = SanitizeSyncConfig(SyncConfig{
-        .image_divisor_steps = static_cast<uint16_t>(
-            ComputePublishIntervalSteps(FpsToPeriodMs(runtime_.fps, time_step_ms_),
-                                        time_step_ms_)),
-        .image_phase_steps = 0,
-    });
-    publish_interval_steps_ = static_cast<int>(sync_config_.image_divisor_steps);
-    publish_phase_steps_ = static_cast<int>(sync_config_.image_phase_steps);
+    base_publish_interval_steps_ =
+        ComputePublishIntervalSteps(FpsToPeriodMs(runtime_.fps, time_step_ms_),
+                                    time_step_ms_);
+    ResetImageSchedule();
     last_processed_step_ = std::numeric_limits<uint64_t>::max();
     cam_->enable(sample_period_ms_);
   }
@@ -523,14 +500,10 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
       cam_->enable(sample_period_ms_);
     }
 
-    sync_config_ = SanitizeSyncConfig(SyncConfig{
-        .image_divisor_steps = static_cast<uint16_t>(
-            ComputePublishIntervalSteps(FpsToPeriodMs(runtime_.fps, time_step_ms_),
-                                        time_step_ms_)),
-        .image_phase_steps = 0,
-    });
-    publish_interval_steps_ = static_cast<int>(sync_config_.image_divisor_steps);
-    publish_phase_steps_ = static_cast<int>(sync_config_.image_phase_steps);
+    base_publish_interval_steps_ =
+        ComputePublishIntervalSteps(FpsToPeriodMs(runtime_.fps, time_step_ms_),
+                                    time_step_ms_);
+    ResetImageSchedule();
     last_processed_step_ = std::numeric_limits<uint64_t>::max();
   }
 
@@ -591,11 +564,45 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
     return true;
   }
 
-  bool ShouldPublishImageThisStep(uint64_t sim_step) const
+  void ResetImageSchedule()
   {
-    return publish_interval_steps_ > 0 &&
-           (sim_step % static_cast<uint64_t>(publish_interval_steps_)) ==
-               static_cast<uint64_t>(publish_phase_steps_);
+    image_schedule_inited_ = false;
+    next_image_step_ = 0;
+    pending_sync_cmd_id_ = 0;
+    scheduled_sync_cmd_id_ = 0;
+  }
+
+  void EnsureImageSchedule(uint64_t sim_step)
+  {
+    if (image_schedule_inited_)
+    {
+      return;
+    }
+
+    image_schedule_inited_ = true;
+    next_image_step_ = sim_step;
+  }
+
+  bool IsImageDueThisStep(uint64_t sim_step) const { return sim_step >= next_image_step_; }
+
+  void TrySchedulePendingSyncCmd()
+  {
+    if (!image_schedule_inited_ || pending_sync_cmd_id_ == 0 || scheduled_sync_cmd_id_ != 0)
+    {
+      return;
+    }
+
+    next_image_step_ += static_cast<uint64_t>(base_publish_interval_steps_);
+    scheduled_sync_cmd_id_ = pending_sync_cmd_id_;
+    pending_sync_cmd_id_ = 0;
+  }
+
+  uint32_t ConsumeCurrentImageSyncCmdId()
+  {
+    const uint32_t sync_cmd_id = scheduled_sync_cmd_id_;
+    scheduled_sync_cmd_id_ = 0;
+    next_image_step_ += static_cast<uint64_t>(base_publish_interval_steps_);
+    return sync_cmd_id;
   }
 
   // ---- Pose / Motion 采样 ----
@@ -619,20 +626,23 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
     gimbal_rotation_topic_.Publish(rotation);
   }
 
-  void ApplyPendingSyncConfig()
+  void ApplyPendingSensorSyncCmd()
   {
-    if (!sync_config_sub_.Available())
+    if (!sensor_sync_cmd_sub_.Available())
     {
       return;
     }
 
-    const SyncConfig next = SanitizeSyncConfig(sync_config_sub_.GetData());
-    sync_config_sub_.StartWaiting();
+    const SensorSyncCmd cmd = sensor_sync_cmd_sub_.GetData();
+    sensor_sync_cmd_sub_.StartWaiting();
+    if (cmd.cmd_id == 0)
+    {
+      return;
+    }
 
-    sync_config_ = next;
-    publish_interval_steps_ = static_cast<int>(sync_config_.image_divisor_steps);
-    publish_phase_steps_ = static_cast<int>(sync_config_.image_phase_steps);
-    last_processed_step_ = std::numeric_limits<uint64_t>::max();
+    pending_sync_cmd_id_ = cmd.cmd_id;
+    TrySchedulePendingSyncCmd();
+    XR_LOG_INFO("WebotsCamera: accepted sensor_sync_cmd id=%u", cmd.cmd_id);
   }
 
   void PublishRawImu(const PoseSample& pose, const MotionSample& motion,
@@ -672,12 +682,14 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
     raw_quat_topic_.Publish(quat);
   }
 
-  void PublishImageEvent(LibXR::MicrosecondTimestamp timestamp, uint64_t sim_step)
+  void PublishImageEvent(LibXR::MicrosecondTimestamp timestamp, uint64_t sim_step,
+                         uint32_t sync_cmd_id)
   {
     ImageEvent event{
         .sensor_timestamp_us = static_cast<uint64_t>(timestamp),
         .image_sequence = image_sequence_++,
         .sensor_step_index = static_cast<uint32_t>(sim_step),
+        .sync_cmd_id = sync_cmd_id,
     };
     image_event_topic_.Publish(event);
   }
@@ -817,13 +829,15 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
 
       LibXR::Thread::Sleep(self->time_step_ms_);
 
-      self->ApplyPendingSyncConfig();
-
       const uint64_t sim_step = self->CurrentSimStep();
       if (!self->EnterNewStep(sim_step))
       {
         continue;
       }
+
+      self->EnsureImageSchedule(sim_step);
+      self->ApplyPendingSensorSyncCmd();
+      self->TrySchedulePendingSyncCmd();
 
       const auto timestamp = self->CurrentSimTimeUs();
       auto pose = self->ReadCameraPoseSample(timestamp);
@@ -836,12 +850,13 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
 
       self->PublishRawImu(pose, motion, timestamp, self->imu_sequence_++);
 
-      if (!self->ShouldPublishImageThisStep(sim_step))
+      if (!self->IsImageDueThisStep(sim_step))
       {
         continue;
       }
 
-      self->PublishImageEvent(timestamp, sim_step);
+      const uint32_t sync_cmd_id = self->ConsumeCurrentImageSyncCmdId();
+      self->PublishImageEvent(timestamp, sim_step, sync_cmd_id);
 
       const unsigned char* rgba = self->cam_->getImage();
       if (rgba != nullptr)
@@ -867,7 +882,7 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
   std::string accl_topic_name_{};
   std::string quat_topic_name_{};
   std::string image_event_topic_name_{};
-  std::string sync_config_topic_name_{};
+  std::string sensor_sync_cmd_topic_name_{};
   // rotation topic 保持在 gimbal domain，沿用历史消费者的查找路径。
   LibXR::Topic::Domain gimbal_domain_ = LibXR::Topic::Domain("gimbal");
   LibXR::Topic gimbal_rotation_topic_ =
@@ -876,8 +891,8 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
   LibXR::Topic raw_accl_topic_{};
   LibXR::Topic raw_quat_topic_{};
   LibXR::Topic image_event_topic_{};
-  LibXR::Topic sync_config_topic_{};
-  LibXR::Topic::ASyncSubscriber<SyncConfig> sync_config_sub_;
+  LibXR::Topic sensor_sync_cmd_topic_{};
+  LibXR::Topic::ASyncSubscriber<SensorSyncCmd> sensor_sync_cmd_sub_;
 
   webots::Robot* robot_{};
   webots::Camera* cam_ = nullptr;
@@ -888,8 +903,7 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
   ImuSensorNames imu_sensor_names_{};
   int time_step_ms_ = 0;
   int sample_period_ms_ = 33;
-  int publish_interval_steps_ = 1;
-  int publish_phase_steps_ = 0;
+  int base_publish_interval_steps_ = 1;
 
   std::atomic<bool> running_{false};
   LibXR::Thread capture_thread_{};
@@ -897,7 +911,10 @@ class WebotsCamera : public LibXR::Application, public CameraBase<CameraInfoV>
   uint32_t imu_sequence_{0};
   uint32_t image_sequence_{0};
   uint64_t last_processed_step_ = std::numeric_limits<uint64_t>::max();
-  SyncConfig sync_config_{};
+  uint64_t next_image_step_{0};
+  uint32_t pending_sync_cmd_id_{0};
+  uint32_t scheduled_sync_cmd_id_{0};
+  bool image_schedule_inited_{false};
   bool pose_zero_calibrated_ = false;
   // 首帧冻结的零位标定矩阵：把 raw camera node 姿态/向量对齐到外部发布帧。
   LibXR::RotationMatrix<double> pose_zero_calibration_{};

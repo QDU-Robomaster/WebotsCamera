@@ -8,9 +8,9 @@
   - `camera_gyro`
   - `camera_accl`
   - `camera_quat`
-- 图像只走 `CameraBase` 的图像 sink；提交事件和到达时间由同步模块处理
+- 图像只写入 `CameraBase::ImageFrame`，`timestamp_us` 使用传感器侧时间
 - 接收一次性 `sensor_sync_cmd` 探针，把**下一次图像周期**从 `N` 拉成 `2N`
-- 不额外回填 `seq/id`；主机侧通过图像提交到达时间差识别探针帧
+- 不额外回填 `seq/id`；主机侧通过图像传感器时间差识别探针帧
 
 ## Topic 约定
 
@@ -38,7 +38,7 @@
 - 主机侧发出一次 `sensor_sync_cmd`
 - `WebotsCamera` 只把“下一张图”的发布时间再向后推一个基础周期
   - 间隔变化表现为 `N -> 2N -> N`
-- 主机侧只使用图像提交到达时间差观察这个节拍变化
+- 主机侧只使用图像传感器时间差观察这个节拍变化
 - 最终 IMU 选帧仍由主机侧在 IMU 自己的时间域里完成，`WebotsCamera` 不负责跨域对齐
 
 ## 坐标与姿态

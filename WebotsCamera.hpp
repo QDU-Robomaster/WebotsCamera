@@ -37,7 +37,7 @@ depends:
 #include <limits>
 #include <stdexcept>
 #include <string>
-#include <utility>
+#include <string_view>
 
 #include <opencv2/core/mat.hpp>
 #include <opencv2/imgproc.hpp>
@@ -129,7 +129,7 @@ class WebotsCamera : public LibXR::Application,
   struct RuntimeParam
   {
     // Webots Camera 设备名，同时也是原始 topic 前缀；不能为空。
-    std::string device_name = "camera";
+    std::string_view device_name = "camera";
 
     // 目标发布频率。最终会被量化到世界步长上。
     int fps = 30;
@@ -141,20 +141,20 @@ class WebotsCamera : public LibXR::Application,
     double gain = 0.0;
 
     // IMU 设备名前缀；不能为空。
-    std::string pose_def_name = "camera";
+    std::string_view pose_def_name = "camera";
 
     // 图像与 imu 的原始输出名，供同步器和其他消费者复用。
-    std::string image_topic_name = "camera_image";
-    std::string imu_topic_name = "camera_imu";
+    std::string_view image_topic_name = "camera_image";
+    std::string_view imu_topic_name = "camera_imu";
   };
 
   explicit WebotsCamera(LibXR::HardwareContainer& hw, LibXR::ApplicationManager& app,
                         RuntimeParam runtime)
       : Base(hw, runtime.device_name, runtime.image_topic_name, runtime.imu_topic_name),
-        runtime_(std::move(runtime)),
-        gyro_topic_name_(runtime_.device_name + "_gyro"),
-        accl_topic_name_(runtime_.device_name + "_accl"),
-        quat_topic_name_(runtime_.device_name + "_quat"),
+        runtime_(runtime),
+        gyro_topic_name_(std::string(runtime_.device_name) + "_gyro"),
+        accl_topic_name_(std::string(runtime_.device_name) + "_accl"),
+        quat_topic_name_(std::string(runtime_.device_name) + "_quat"),
         raw_gyro_topic_(LibXR::Topic::FindOrCreate<GyroStamped>(gyro_topic_name_.c_str())),
         raw_accl_topic_(LibXR::Topic::FindOrCreate<AcclStamped>(accl_topic_name_.c_str())),
         raw_quat_topic_(LibXR::Topic::FindOrCreate<QuatStamped>(quat_topic_name_.c_str())),
@@ -189,7 +189,7 @@ class WebotsCamera : public LibXR::Application,
 
     XR_LOG_PASS(
         "Webots camera enabled: name=%s, capture_period=%d ms, world_dt=%d ms, image_divisor=%d",
-        runtime_.device_name.c_str(), base_image_interval_steps_ * time_step_ms_, time_step_ms_,
+        this->Name(), base_image_interval_steps_ * time_step_ms_, time_step_ms_,
         base_image_interval_steps_);
 
     app.Register(*this);
@@ -250,10 +250,10 @@ class WebotsCamera : public LibXR::Application,
 
   void InitCamera()
   {
-    cam_ = robot_->getCamera(runtime_.device_name.c_str());
+    cam_ = robot_->getCamera(this->Name());
     if (cam_ == nullptr)
     {
-      XR_LOG_ERROR("Webots Camera '%s' not found!", runtime_.device_name.c_str());
+      XR_LOG_ERROR("Webots Camera '%s' not found!", this->Name());
       throw std::runtime_error("WebotsCamera: camera device not found");
     }
   }
@@ -262,9 +262,9 @@ class WebotsCamera : public LibXR::Application,
   {
     // 这里只做设备绑定，不做 enable；初始化路径可直接复用这一段。
     imu_sensor_names_ = ImuSensorNames{
-        .gyro = runtime_.pose_def_name + "_gyro",
-        .accelerometer = runtime_.pose_def_name + "_accelerometer",
-        .inertial_unit = runtime_.pose_def_name + "_inertial_unit",
+        .gyro = std::string(runtime_.pose_def_name) + "_gyro",
+        .accelerometer = std::string(runtime_.pose_def_name) + "_accelerometer",
+        .inertial_unit = std::string(runtime_.pose_def_name) + "_inertial_unit",
     };
     gyro_ = robot_->getGyro(imu_sensor_names_.gyro);
     accelerometer_ = robot_->getAccelerometer(imu_sensor_names_.accelerometer);

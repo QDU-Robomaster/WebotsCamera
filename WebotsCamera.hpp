@@ -726,6 +726,28 @@ class WebotsCamera : private WebotsCameraNames,
     }
   }
 
+  void ReportSensorReadFailure(const char* sensor_group, int& fail_count)
+  {
+    ++fail_count;
+    if (fail_count == 1 || fail_count % 1000 == 0)
+    {
+      XR_LOG_WARN("WebotsCamera: %s sample unavailable (%d consecutive steps)",
+                  sensor_group, fail_count);
+    }
+  }
+
+  void ReportSensorReadRecovered(const char* sensor_group, int& fail_count)
+  {
+    if (fail_count == 0)
+    {
+      return;
+    }
+
+    XR_LOG_INFO("WebotsCamera: %s sample recovered after %d missed steps",
+                sensor_group, fail_count);
+    fail_count = 0;
+  }
+
   void ProcessCaptureStep(const SimClockSample& clock)
   {
     InitializeImageScheduleIfNeeded(clock.step);
@@ -734,15 +756,19 @@ class WebotsCamera : private WebotsCameraNames,
     PoseSample pose{};
     if (!ReadCameraPoseSample(clock.timestamp, pose))
     {
+      ReportSensorReadFailure("pose", pose_read_fail_count_);
       return;
     }
+    ReportSensorReadRecovered("pose", pose_read_fail_count_);
     PublishGimbalRotation(pose);
 
     MotionSample motion{};
     if (!ReadImuMotionSample(motion))
     {
+      ReportSensorReadFailure("imu motion", motion_read_fail_count_);
       return;
     }
+    ReportSensorReadRecovered("imu motion", motion_read_fail_count_);
 
     PublishRawImu(pose, motion, clock.timestamp);
     if (!ShouldPublishImageAtStep(clock.step))
@@ -811,6 +837,8 @@ class WebotsCamera : private WebotsCameraNames,
   std::atomic<bool> running_{false};
   LibXR::Thread capture_thread_{};
   int consecutive_fail_count_ = 0;
+  int pose_read_fail_count_ = 0;
+  int motion_read_fail_count_ = 0;
   uint64_t last_processed_step_ = std::numeric_limits<uint64_t>::max();
   uint64_t next_image_step_{0};
   bool next_image_interval_stretched_{false};

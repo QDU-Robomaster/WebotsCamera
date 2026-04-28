@@ -10,7 +10,6 @@
   - `camera_quat`
 - 图像只写入 `CameraBase::ImageFrame`，`timestamp_us` 使用传感器侧时间
 - 接收一次性 `sensor_sync_cmd` 探针，把**下一次图像周期**从 `N` 拉成 `2N`
-- 不额外回填 `seq/id`；主机侧通过图像传感器时间差识别探针帧
 
 ## Topic 约定
 

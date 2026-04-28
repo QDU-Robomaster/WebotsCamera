@@ -54,9 +54,8 @@ depends:
 #include <webots/Accelerometer.hpp>
 #include <webots/Camera.hpp>
 #include <webots/Gyro.hpp>
-#include <webots/Node.hpp>
+#include <webots/InertialUnit.hpp>
 #include <webots/Robot.hpp>
-#include <webots/Supervisor.hpp>
 
 extern webots::Robot* _libxr_webots_robot_handle;
 
@@ -102,7 +101,7 @@ class WebotsCameraNames
  * 1. 从 Webots Camera 取出原始 BGRA 图像；
  * 2. 每个 world step 发布一组原始 imu（gyro/accl/quat）；
  * 3. 按基础分频发布图像，并响应一次性 `sensor_sync_cmd` 探针；
- * 4. 从 supervisor 读取相机 pose，把图像写入 `CameraBase::ImageFrame`
+ * 4. 从 Webots IMU 传感器读取姿态与运动量，把图像写入 `CameraBase::ImageFrame`
  *    并交给已注册的图像 sink。
  */
 template <CameraTypes::CameraInfo CameraInfoV>
@@ -154,6 +153,7 @@ class WebotsCamera : private WebotsCameraNames,
     // world 里通过统一前缀拼接出来的设备名，例如 camera_gyro。
     std::string gyro;
     std::string accelerometer;
+    std::string inertial_unit;
   };
 
   struct SimClockSample
@@ -177,7 +177,7 @@ class WebotsCamera : private WebotsCameraNames,
     // Webots 不支持 gain；非零输入会被直接忽略。
     double gain = 0.0;
 
-    // 用于 supervisor 查询相机位姿，同时也是 IMU 设备名前缀；不能为空。
+    // IMU 设备名前缀；不能为空。
     std::string pose_def_name = "camera";
 
     // 图像与 imu 的原始输出名，供同步器和其他消费者复用。
@@ -215,7 +215,6 @@ class WebotsCamera : private WebotsCameraNames,
 
     InitRobot();
     InitCamera();
-    InitSupervisor(hw);
     InitImuSensors();
     ValidateCameraGeometry();
     ConfigureSamplingOnStartup();
@@ -226,7 +225,8 @@ class WebotsCamera : private WebotsCameraNames,
 
     XR_LOG_PASS(
         "Webots camera enabled: name=%s, capture_period=%d ms, world_dt=%d ms, image_divisor=%d",
-        DeviceNameOwned().c_str(), time_step_ms_, time_step_ms_, base_image_interval_steps_);
+        DeviceNameOwned().c_str(), base_image_interval_steps_ * time_step_ms_, time_step_ms_,
+        base_image_interval_steps_);
 
     app.Register(*this);
   }
@@ -300,9 +300,11 @@ class WebotsCamera : private WebotsCameraNames,
     imu_sensor_names_ = ImuSensorNames{
         .gyro = PoseDefNameOwned() + "_gyro",
         .accelerometer = PoseDefNameOwned() + "_accelerometer",
+        .inertial_unit = PoseDefNameOwned() + "_inertial_unit",
     };
     gyro_ = robot_->getGyro(imu_sensor_names_.gyro);
     accelerometer_ = robot_->getAccelerometer(imu_sensor_names_.accelerometer);
+    inertial_unit_ = robot_->getInertialUnit(imu_sensor_names_.inertial_unit);
 
     if (gyro_ == nullptr)
     {
@@ -315,6 +317,12 @@ class WebotsCamera : private WebotsCameraNames,
       XR_LOG_ERROR("WebotsCamera: accelerometer '%s' not found in world.",
                    imu_sensor_names_.accelerometer.c_str());
       throw std::runtime_error("WebotsCamera: accelerometer device not found");
+    }
+    if (inertial_unit_ == nullptr)
+    {
+      XR_LOG_ERROR("WebotsCamera: inertial unit '%s' not found in world.",
+                   imu_sensor_names_.inertial_unit.c_str());
+      throw std::runtime_error("WebotsCamera: inertial unit device not found");
     }
   }
 
@@ -329,9 +337,14 @@ class WebotsCamera : private WebotsCameraNames,
     {
       accelerometer_->enable(time_step_ms_);
     }
-    XR_LOG_INFO("WebotsCamera: IMU devices gyro=%s accelerometer=%s",
+    if (inertial_unit_ != nullptr)
+    {
+      inertial_unit_->enable(time_step_ms_);
+    }
+    XR_LOG_INFO("WebotsCamera: IMU devices gyro=%s accelerometer=%s inertial_unit=%s",
                 imu_sensor_names_.gyro.c_str(),
-                imu_sensor_names_.accelerometer.c_str());
+                imu_sensor_names_.accelerometer.c_str(),
+                imu_sensor_names_.inertial_unit.c_str());
   }
 
   void ValidateCameraGeometry() const
@@ -357,17 +370,14 @@ class WebotsCamera : private WebotsCameraNames,
 
   void ConfigureSamplingOnStartup()
   {
-    // Camera 每个 world step 都使能，真正的发图频率由本地图像调度器控制。
+    // Webots Camera 的采样周期会直接变成仿真侧渲染负载。
+    // 这里把设备采样周期收敛到目标图像周期，避免只想发 100Hz 时仍以 1kHz 渲染。
     base_image_interval_steps_ = ComputePublishIntervalSteps(FpsToPeriodMs(runtime_.fps),
                                                              time_step_ms_);
+    const int camera_sampling_period_ms = base_image_interval_steps_ * time_step_ms_;
     ResetImageSchedule();
     last_processed_step_ = std::numeric_limits<uint64_t>::max();
-    cam_->enable(time_step_ms_);
-  }
-
-  void InitSupervisor(LibXR::HardwareContainer& hw)
-  {
-    supervisor_ = hw.FindOrExit<webots::Supervisor>({"supervisor"});
+    cam_->enable(camera_sampling_period_ms);
   }
 
   void StartCaptureThread()
@@ -449,9 +459,10 @@ class WebotsCamera : private WebotsCameraNames,
       return;
     }
 
-    // 调度器复位后的第一张图，以当前 step 作为新的节拍零点。
+    // 调度器复位后的第一张图，等一个完整的 camera 周期后再发布，
+    // 避免 Webots 还没产出首帧时先发出 image_event。
     image_schedule_initialized_ = true;
-    next_image_step_ = sim_step;
+    next_image_step_ = sim_step + static_cast<uint64_t>(base_image_interval_steps_);
   }
 
   bool ShouldPublishImageAtStep(uint64_t sim_step) const
@@ -481,20 +492,13 @@ class WebotsCamera : private WebotsCameraNames,
 
   // ---- Pose / Motion 采样 ----
 
-  void RefreshCameraNode()
-  {
-    // camera node 通过 supervisor 按 DEF 延迟绑定，允许 world 初始化稍晚完成。
-    if (cam_node_ == nullptr && supervisor_ != nullptr)
-    {
-      cam_node_ = supervisor_->getFromDef(PoseDefNameOwned().c_str());
-    }
-  }
-
   void PublishGimbalRotation(const PoseSample& pose)
   {
+#if LIBXR_LOG_LEVEL >= 4
     const LibXR::EulerAngle<float> eulr = pose.rotation.ToEulerAngle();
     XR_LOG_DEBUG("WebotsCamera: camera euler roll_x=%.3f pitch_y=%.3f yaw_z=%.3f",
                  eulr.Roll(), eulr.Pitch(), eulr.Yaw());
+#endif
     // 这个 topic 只发布已经过零位标定后的外部语义姿态，不暴露原始 camera node 姿态。
     auto rotation = pose.rotation;
     gimbal_rotation_topic_.Publish(rotation);
@@ -565,21 +569,25 @@ class WebotsCamera : private WebotsCameraNames,
     image_event_topic_.Publish(event);
   }
 
-  PoseSample ReadCameraPoseSample(LibXR::MicrosecondTimestamp timestamp)
+  bool ReadCameraPoseSample(LibXR::MicrosecondTimestamp timestamp, PoseSample& pose)
   {
-    PoseSample pose{};
     pose.timestamp = timestamp;
 
-    RefreshCameraNode();
-    if (cam_node_ == nullptr)
+    if (inertial_unit_ == nullptr)
     {
-      return pose;
+      return false;
     }
 
-    const double* r9_cam = cam_node_->getOrientation();
-    const LibXR::RotationMatrix<double> camera_rotation_world(
-        r9_cam[0], r9_cam[1], r9_cam[2], r9_cam[3], r9_cam[4], r9_cam[5],
-        r9_cam[6], r9_cam[7], r9_cam[8]);
+    const double* raw_xyzw = inertial_unit_->getQuaternion();
+    if (raw_xyzw == nullptr)
+    {
+      return false;
+    }
+
+    // Webots InertialUnit::getQuaternion() 返回 xyzw，这里统一转成 libxr 的 wxyz。
+    const LibXR::Quaternion<double> raw_quat(raw_xyzw[3], raw_xyzw[0], raw_xyzw[1],
+                                             raw_xyzw[2]);
+    const LibXR::RotationMatrix<double> camera_rotation_world(raw_quat);
 
     // 对外发布的 IMU/姿态坐标系固定定义为右手系：x 向右、y 向前、z 向上。
     // 这里的中立矩阵表示“零位时该发布坐标系在 world 下的朝向”。
@@ -606,7 +614,7 @@ class WebotsCamera : private WebotsCameraNames,
 
     // 当前 WebotsCamera 只负责旋转语义；平移仍维持历史上的零平移发布策略。
     pose.translation = LibXR::Position<float>(0.0f, 0.0f, 0.0f);
-    return pose;
+    return true;
   }
 
   LibXR::Position<float> RotateCameraNodeVectorToPublishedFrame(
@@ -723,7 +731,11 @@ class WebotsCamera : private WebotsCameraNames,
     InitializeImageScheduleIfNeeded(clock.step);
     PollSensorSyncProbeCommand();
 
-    const PoseSample pose = ReadCameraPoseSample(clock.timestamp);
+    PoseSample pose{};
+    if (!ReadCameraPoseSample(clock.timestamp, pose))
+    {
+      return;
+    }
     PublishGimbalRotation(pose);
 
     MotionSample motion{};
@@ -756,7 +768,8 @@ class WebotsCamera : private WebotsCameraNames,
         break;
       }
 
-      // Webots 控制器线程不直接阻塞在 robot->step，这里按 basicTimeStep 节拍轮询。
+      // Webots 控制器线程不直接调用 robot->step；Sleep 在 Webots 后端会挂到
+      // step 通知上，libxr 时间基会等 REALTIME 采集线程再次挂起后才进入下一步。
       LibXR::Thread::Sleep(self->time_step_ms_);
 
       const SimClockSample clock = self->ReadSimClockSample();
@@ -790,8 +803,7 @@ class WebotsCamera : private WebotsCameraNames,
   webots::Camera* cam_ = nullptr;
   webots::Gyro* gyro_ = nullptr;
   webots::Accelerometer* accelerometer_ = nullptr;
-  webots::Node* cam_node_ = nullptr;
-  webots::Supervisor* supervisor_ = nullptr;
+  webots::InertialUnit* inertial_unit_ = nullptr;
   ImuSensorNames imu_sensor_names_{};
   int time_step_ms_ = 0;
   int base_image_interval_steps_ = 1;

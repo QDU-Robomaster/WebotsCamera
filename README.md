@@ -50,6 +50,11 @@
   - `y` 向前
   - `z` 向上
 - `rotation_wxyz`、`camera_gyro`、`camera_accl`、`gimbal/rotation` 全部使用这一套坐标语义
+- Webots world 需要在相机同一坐标系下提供三类设备：
+  - `camera_gyro`
+  - `camera_accelerometer`
+  - `camera_inertial_unit`
+- `camera_quat` 与 `gimbal/rotation` 来自 `InertialUnit`，不再由 supervisor 直接读取 node 姿态拼出来
 - `angular_velocity_xyz` 的正方向遵循各轴右手定则
 - 第一次读到相机姿态时会冻结一份零位标定矩阵
   - 后续发布的四元数、角速度、线加速度都相对同一零位解释

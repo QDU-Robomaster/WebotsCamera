@@ -36,7 +36,6 @@ depends:
 #include <cstring>
 #include <limits>
 #include <stdexcept>
-#include <string>
 #include <string_view>
 
 #include <opencv2/core/mat.hpp>
@@ -46,6 +45,7 @@ depends:
 #include "app_framework.hpp"
 #include "libxr.hpp"
 #include "libxr_system.hpp"
+#include "libxr_string.hpp"
 #include "logger.hpp"
 #include "message.hpp"
 #include "thread.hpp"
@@ -114,9 +114,9 @@ class WebotsCamera : public LibXR::Application,
   struct ImuSensorNames
   {
     // world 里通过统一前缀拼接出来的设备名，例如 camera_gyro。
-    std::string gyro;
-    std::string accelerometer;
-    std::string inertial_unit;
+    LibXR::RuntimeStringView<> gyro;
+    LibXR::RuntimeStringView<> accelerometer;
+    LibXR::RuntimeStringView<> inertial_unit;
   };
 
   struct SimClockSample
@@ -155,16 +155,18 @@ class WebotsCamera : public LibXR::Application,
         exposure_(runtime.exposure),
         gain_(runtime.gain),
         imu_sensor_names_{
-            .gyro = std::string(runtime.pose_def_name) + "_gyro",
-            .accelerometer = std::string(runtime.pose_def_name) + "_accelerometer",
-            .inertial_unit = std::string(runtime.pose_def_name) + "_inertial_unit",
+            .gyro = LibXR::RuntimeStringView<>(runtime.pose_def_name, "_gyro"),
+            .accelerometer =
+                LibXR::RuntimeStringView<>(runtime.pose_def_name, "_accelerometer"),
+            .inertial_unit =
+                LibXR::RuntimeStringView<>(runtime.pose_def_name, "_inertial_unit"),
         },
-        gyro_topic_name_(std::string(runtime.device_name) + "_gyro"),
-        accl_topic_name_(std::string(runtime.device_name) + "_accl"),
-        quat_topic_name_(std::string(runtime.device_name) + "_quat"),
-        raw_gyro_topic_(LibXR::Topic::FindOrCreate<GyroStamped>(gyro_topic_name_.c_str())),
-        raw_accl_topic_(LibXR::Topic::FindOrCreate<AcclStamped>(accl_topic_name_.c_str())),
-        raw_quat_topic_(LibXR::Topic::FindOrCreate<QuatStamped>(quat_topic_name_.c_str())),
+        gyro_topic_name_(runtime.device_name, "_gyro"),
+        accl_topic_name_(runtime.device_name, "_accl"),
+        quat_topic_name_(runtime.device_name, "_quat"),
+        raw_gyro_topic_(LibXR::Topic::FindOrCreate<GyroStamped>(gyro_topic_name_.CStr())),
+        raw_accl_topic_(LibXR::Topic::FindOrCreate<AcclStamped>(accl_topic_name_.CStr())),
+        raw_quat_topic_(LibXR::Topic::FindOrCreate<QuatStamped>(quat_topic_name_.CStr())),
         sensor_sync_cmd_topic_(
             LibXR::Topic::FindOrCreate<SensorSyncCmd>("sensor_sync_cmd")),
         sensor_sync_cmd_sub_(sensor_sync_cmd_topic_),
@@ -268,26 +270,26 @@ class WebotsCamera : public LibXR::Application,
   void BindImuSensors()
   {
     // 这里只做设备绑定，不做 enable；初始化路径可直接复用这一段。
-    gyro_ = robot_->getGyro(imu_sensor_names_.gyro);
-    accelerometer_ = robot_->getAccelerometer(imu_sensor_names_.accelerometer);
-    inertial_unit_ = robot_->getInertialUnit(imu_sensor_names_.inertial_unit);
+    gyro_ = robot_->getGyro(imu_sensor_names_.gyro.CStr());
+    accelerometer_ = robot_->getAccelerometer(imu_sensor_names_.accelerometer.CStr());
+    inertial_unit_ = robot_->getInertialUnit(imu_sensor_names_.inertial_unit.CStr());
 
     if (gyro_ == nullptr)
     {
       XR_LOG_ERROR("WebotsCamera: gyro '%s' not found in world.",
-                   imu_sensor_names_.gyro.c_str());
+                   imu_sensor_names_.gyro.CStr());
       throw std::runtime_error("WebotsCamera: gyro device not found");
     }
     if (accelerometer_ == nullptr)
     {
       XR_LOG_ERROR("WebotsCamera: accelerometer '%s' not found in world.",
-                   imu_sensor_names_.accelerometer.c_str());
+                   imu_sensor_names_.accelerometer.CStr());
       throw std::runtime_error("WebotsCamera: accelerometer device not found");
     }
     if (inertial_unit_ == nullptr)
     {
       XR_LOG_ERROR("WebotsCamera: inertial unit '%s' not found in world.",
-                   imu_sensor_names_.inertial_unit.c_str());
+                   imu_sensor_names_.inertial_unit.CStr());
       throw std::runtime_error("WebotsCamera: inertial unit device not found");
     }
   }
@@ -308,9 +310,9 @@ class WebotsCamera : public LibXR::Application,
       inertial_unit_->enable(time_step_ms_);
     }
     XR_LOG_INFO("WebotsCamera: IMU devices gyro=%s accelerometer=%s inertial_unit=%s",
-                imu_sensor_names_.gyro.c_str(),
-                imu_sensor_names_.accelerometer.c_str(),
-                imu_sensor_names_.inertial_unit.c_str());
+                imu_sensor_names_.gyro.CStr(),
+                imu_sensor_names_.accelerometer.CStr(),
+                imu_sensor_names_.inertial_unit.CStr());
   }
 
   void ValidateCameraGeometry() const
@@ -758,9 +760,9 @@ class WebotsCamera : public LibXR::Application,
   double exposure_ = 1.0;
   double gain_ = 0.0;
   ImuSensorNames imu_sensor_names_{};
-  std::string gyro_topic_name_{};
-  std::string accl_topic_name_{};
-  std::string quat_topic_name_{};
+  LibXR::RuntimeStringView<> gyro_topic_name_{};
+  LibXR::RuntimeStringView<> accl_topic_name_{};
+  LibXR::RuntimeStringView<> quat_topic_name_{};
   // rotation topic 保持在 gimbal domain，沿用历史消费者的查找路径。
   LibXR::Topic::Domain gimbal_domain_ = LibXR::Topic::Domain("gimbal");
   LibXR::Topic gimbal_rotation_topic_ =

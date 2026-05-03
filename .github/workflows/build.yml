@@ -38,7 +38,7 @@ jobs:
 
           int main() {
               LibXR::PlatformInit();
-              LibXR::STDIO::Printf("This is XRobot Module Template Test\n");
+              LibXR::STDIO::Printf<"This is XRobot Module Template Test\n">();
               LibXR::HardwareContainer hw;
               XRobotMain(hw);
               return 0;
@@ -63,7 +63,7 @@ jobs:
           EOF
 
       - name: Pull libxr to ./libxr
-        run: git clone --depth=1 --branch fix/webots-time-semantics-master-20260416 https://github.com/Jiu-xiao/libxr ./libxr
+        run: git clone --depth=1 --branch master https://github.com/Jiu-xiao/libxr ./libxr
 
       - name: Setup Python & Install deps
         run: |

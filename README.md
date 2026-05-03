@@ -8,15 +8,16 @@
   - `camera_gyro`
   - `camera_accl`
   - `camera_quat`
+- 原始 IMU payload 只放测量值，采样时刻通过 Topic timestamp 携带
 - 图像只写入 `CameraBase::ImageFrame`，`timestamp_us` 使用传感器侧时间
 - 接收一次性 `sensor_sync_cmd` 探针，把**下一次图像周期**从 `N` 拉成 `2N`
 
 ## Topic 约定
 
 - 原始 IMU
-  - `camera_gyro`
-  - `camera_accl`
-  - `camera_quat`
+  - `camera_gyro`：`std::array<float, 3>`，角速度，单位 rad/s
+  - `camera_accl`：`std::array<float, 3>`，线加速度，单位 m/s^2
+  - `camera_quat`：`std::array<float, 4>`，姿态四元数，顺序 wxyz
 - 下行同步探针命令
   - `sensor_sync_cmd`
 - 旋转姿态

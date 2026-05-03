@@ -78,9 +78,8 @@ class WebotsCamera : public LibXR::Application,
   using Base = CameraBase<CameraInfoV>;
   using CameraInfo = typename Base::CameraInfo;
   using ImageFrame = typename Base::ImageFrame;
-  using GyroStamped = typename Base::GyroStamped;
-  using AcclStamped = typename Base::AcclStamped;
-  using QuatStamped = typename Base::QuatStamped;
+  using ImuVector = std::array<float, 3>;
+  using QuatSample = std::array<float, 4>;
   using SensorSyncCmd = typename Base::SensorSyncCmd;
 
   static inline constexpr CameraInfo camera_info = Base::camera_info;
@@ -162,9 +161,9 @@ class WebotsCamera : public LibXR::Application,
         gyro_topic_name_(std::string(runtime.device_name) + "_gyro"),
         accl_topic_name_(std::string(runtime.device_name) + "_accl"),
         quat_topic_name_(std::string(runtime.device_name) + "_quat"),
-        raw_gyro_topic_(LibXR::Topic::FindOrCreate<GyroStamped>(gyro_topic_name_.c_str())),
-        raw_accl_topic_(LibXR::Topic::FindOrCreate<AcclStamped>(accl_topic_name_.c_str())),
-        raw_quat_topic_(LibXR::Topic::FindOrCreate<QuatStamped>(quat_topic_name_.c_str())),
+        raw_gyro_topic_(LibXR::Topic::FindOrCreate<ImuVector>(gyro_topic_name_.c_str())),
+        raw_accl_topic_(LibXR::Topic::FindOrCreate<ImuVector>(accl_topic_name_.c_str())),
+        raw_quat_topic_(LibXR::Topic::FindOrCreate<QuatSample>(quat_topic_name_.c_str())),
         sensor_sync_cmd_topic_(
             LibXR::Topic::FindOrCreate<SensorSyncCmd>("sensor_sync_cmd")),
         sensor_sync_cmd_sub_(sensor_sync_cmd_topic_),
@@ -494,35 +493,16 @@ class WebotsCamera : public LibXR::Application,
   void PublishRawImu(const PoseSample& pose, const MotionSample& motion,
                      LibXR::MicrosecondTimestamp timestamp)
   {
-    GyroStamped gyro{
-        .sensor_timestamp_us = static_cast<uint64_t>(timestamp),
-        .angular_velocity_xyz = {
-            motion.angular_velocity[0],
-            motion.angular_velocity[1],
-            motion.angular_velocity[2],
-        },
-    };
-    AcclStamped accl{
-        .sensor_timestamp_us = static_cast<uint64_t>(timestamp),
-        .linear_acceleration_xyz = {
-            motion.linear_acceleration[0],
-            motion.linear_acceleration[1],
-            motion.linear_acceleration[2],
-        },
-    };
-    QuatStamped quat{
-        .sensor_timestamp_us = static_cast<uint64_t>(timestamp),
-        .rotation_wxyz = {
-            pose.rotation.w(),
-            pose.rotation.x(),
-            pose.rotation.y(),
-            pose.rotation.z(),
-        },
-    };
+    ImuVector gyro{motion.angular_velocity[0], motion.angular_velocity[1],
+                   motion.angular_velocity[2]};
+    ImuVector accl{motion.linear_acceleration[0], motion.linear_acceleration[1],
+                   motion.linear_acceleration[2]};
+    QuatSample quat{pose.rotation.w(), pose.rotation.x(), pose.rotation.y(),
+                    pose.rotation.z()};
 
-    raw_gyro_topic_.Publish(gyro);
-    raw_accl_topic_.Publish(accl);
-    raw_quat_topic_.Publish(quat);
+    raw_gyro_topic_.Publish(gyro, timestamp);
+    raw_accl_topic_.Publish(accl, timestamp);
+    raw_quat_topic_.Publish(quat, timestamp);
   }
 
   bool ReadCameraPoseSample(LibXR::MicrosecondTimestamp timestamp, PoseSample& pose)

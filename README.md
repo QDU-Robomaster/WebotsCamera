@@ -1,63 +1,81 @@
 # WebotsCamera
 
-`WebotsCamera` 是这条链路里的“仿真下位机相机/IMU 端点”。
+WebotsCamera 是 Webots 侧的相机/IMU 数据源。模块只负责采集和发布原始传感器数据：相机提交原始图像，IMU 拆成 gyro / accl / quat 三路 topic。
 
-它的目标不是偷懒直接喂同步后结果，而是尽量把 Webots 里的行为做得接近真实硬件：
+图像与 IMU 的配对由 CameraFrameSync 完成。
 
-- 每个 world step 都发布一组原始 IMU
-  - `camera_gyro`
-  - `camera_accl`
-  - `camera_quat`
-- 图像只写入 `CameraBase::ImageFrame`，`timestamp_us` 使用传感器侧时间
-- 接收一次性 `sensor_sync_cmd` 探针，把**下一次图像周期**从 `N` 拉成 `2N`
+## 功能边界
 
-## Topic 约定
+- 每个 Webots step 发布一组原始 IMU 样本。
+- 图像按 `fps` 分频发布，实际周期量化到 `basicTimeStep`。
+- 图像写入 `CameraBase::ImageFrame`，像素格式固定为紧密排列 BGR8。
+- 传感器时间戳来自 libxr Webots timebase，不直接读取 `robot->getTime()`。
+- `sensor_sync_cmd` 只影响下一次图像间隔，用于同步探针。
+- 模块不做 IMU/图像配对，也不发布同步后的 `ImuStamped`。
 
-- 原始 IMU
-  - `camera_gyro`
-  - `camera_accl`
-  - `camera_quat`
-- 下行同步探针命令
-  - `sensor_sync_cmd`
-- 旋转姿态
-  - `gimbal/rotation`
+## 运行参数
 
-## 当前语义
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `device_name` | `camera` | Webots Camera 设备名，也是原始 IMU topic 前缀。 |
+| `fps` | `30` | 图像目标发布频率，最终量化为整数个 Webots step。 |
+| `exposure` | `1.0` | Webots Camera 曝光值。 |
+| `gain` | `0.0` | 保留参数；Webots Camera 不支持 gain，非零值会被忽略。 |
+| `pose_def_name` | `camera` | IMU 设备名前缀。 |
+| `image_topic_name` | `camera_image` | 原始图像 topic 名。 |
+| `imu_topic_name` | `camera_imu` | 同步后 IMU topic 名，传给 CameraBase 供 CameraFrameSync 发布。 |
 
-- IMU 发布频率 = Webots basicTimeStep
-- 图像发布频率 = `fps` 量化后的整数 step 分频
-- 二者保持整数倍关系，便于主机侧做同步探针实验
-- `sensor_sync_cmd` 不是持续配置，而是一次性命令
-- 探针生效后自动恢复基础周期，不保留 phase 状态
-- 运行参数里的名字字段使用 `std::string_view` 作为构造入口；构造完成后模块只保留
-  基类自有名字和派生出的 topic / Webots 设备名，不要求调用侧继续持有原字符串
-- 模块按控制器进程生命周期使用；启动后启用 Webots 设备，析构路径只停止采集线程，不承诺在同一进程内反复卸载/重载设备。
+## Topic
 
-## 同步探针流程
+| Topic | Payload | 时间戳 | 说明 |
+| --- | --- | --- | --- |
+| `<device_name>_gyro` | `std::array<float, 3>` | Topic timestamp | 角速度，单位 rad/s。 |
+| `<device_name>_accl` | `std::array<float, 3>` | Topic timestamp | 线加速度，单位 m/s^2。 |
+| `<device_name>_quat` | `std::array<float, 4>` | Topic timestamp | 姿态四元数，顺序 wxyz。 |
+| `image_topic_name` | `CameraBase::ImageFrame` | `ImageFrame::timestamp_us` | 原始 BGR8 图像。 |
+| `sensor_sync_cmd` | `CameraBase::SensorSyncCmd` | 不使用 | 一次性同步探针命令。 |
+| `gimbal/rotation` | `LibXR::Quaternion<float>` | Topic timestamp | 与 `<device_name>_quat` 同源。 |
 
-- 正常状态下，图像按基础周期 `N` step 发布
-- 主机侧发出一次 `sensor_sync_cmd`
-- `WebotsCamera` 只把“下一张图”的发布时间再向后推一个基础周期
-  - 间隔变化表现为 `N -> 2N -> N`
-- 主机侧只使用图像传感器时间差观察这个节拍变化
-- 最终 IMU 选帧仍由主机侧在 IMU 自己的时间域里完成，`WebotsCamera` 不负责跨域对齐
+默认配置下原始 IMU topic 为 `camera_gyro`、`camera_accl`、`camera_quat`。
 
-## 坐标与姿态
+## 时间与同步探针
 
-- 对外发布的 IMU/姿态坐标系固定为右手系
-  - `x` 向右
-  - `y` 向前
-  - `z` 向上
-- `rotation_wxyz`、`camera_gyro`、`camera_accl`、`gimbal/rotation` 全部使用这一套坐标语义
-- Webots world 需要在相机同一坐标系下提供三类设备：
-  - `camera_gyro`
-  - `camera_accelerometer`
-  - `camera_inertial_unit`
-- `camera_quat` 与 `gimbal/rotation` 来自 `InertialUnit`，不再由 supervisor 直接读取 node 姿态拼出来
-- `angular_velocity_xyz` 的正方向遵循各轴右手定则
-- 第一次读到相机姿态时会冻结一份零位标定矩阵
-  - 后续发布的四元数、角速度、线加速度都相对同一零位解释
-  - 不会在运行过程中切换坐标语义
+libxr Webots timebase 在每次仿真 step 后推进。WebotsCamera 使用 `LibXR::Timebase::GetMicroseconds()` 作为传感器时间戳。
+
+模块不调用 `robot->getTime()`。
+
+正常图像间隔为 `N` 个 Webots step。收到 `sensor_sync_cmd` 后，WebotsCamera 把下一张图像延后一个基础图像周期，因此图像间隔表现为：
+
+```text
+N -> 2N -> N
+```
+
+CameraFrameSync 根据图像传感器时间差识别探针位置，再在 IMU 时间轴中选帧。WebotsCamera 不比较图像时间戳和 IMU 时间戳，也不发布同步结果。
+
+## 坐标系
+
+Webots world 必须把 Camera、Gyro、Accelerometer、InertialUnit 安装成同一套坐标系：
+
+- 右手系。
+- `x` 向右。
+- `y` 向前。
+- `z` 向上。
+
+`camera_quat`、`camera_gyro`、`camera_accl`、`gimbal/rotation` 均使用这套坐标系。角速度正方向遵循各轴右手定则。
+
+模块不做运行时零位标定，也不补偿 world 中的安装误差；坐标错误应在 world 中修正。
+
+## Webots 设备约定
+
+当 `pose_def_name = camera` 时，world 中需要提供：
+
+- `camera_gyro`
+- `camera_accelerometer`
+- `camera_inertial_unit`
+
+三类 IMU 设备应与 Camera 节点共用同一坐标定义。`camera_quat` 和 `gimbal/rotation` 均来自 `InertialUnit::getQuaternion()`。
+
+Webots 返回的 xyzw 会在模块内转换为 wxyz。
 
 ## 依赖
 

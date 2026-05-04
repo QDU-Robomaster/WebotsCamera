@@ -86,7 +86,7 @@ jobs:
             MainCameraInfo:
               type: CameraTypes::CameraInfo
               value:
-                expr: "CameraTypes::CameraInfo{1280, 720, 3840, CameraTypes::Encoding::BGR8, {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0}, CameraTypes::DistortionModel::PLUMB_BOB, {0.0, 0.0, 0.0, 0.0, 0.0}, {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0}, {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0}}"
+                expr: "CameraTypes::CameraInfo{1280, 720, 3840, CameraTypes::Encoding::BGR8, {700.0, 0.0, 640.0, 0.0, 700.0, 360.0, 0.0, 0.0, 1.0}, CameraTypes::DistortionModel::PLUMB_BOB, {0.0, 0.0, 0.0, 0.0, 0.0}, {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0}, {700.0, 0.0, 640.0, 0.0, 0.0, 700.0, 360.0, 0.0, 0.0, 0.0, 1.0, 0.0}}"
 
           modules:
             - id: WebotsCamera_0

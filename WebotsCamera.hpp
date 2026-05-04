@@ -10,6 +10,9 @@ constructor_args:
       exposure: 1.0
       gain: 0.0
       pose_def_name: "camera"
+      raw_topic_domain_name: "mcu"
+      trigger_gpio_name: "CAMERA"
+      trigger_active_level: true
 template_args:
   - Info:
       width: 1280
@@ -28,7 +31,6 @@ depends:
 // clang-format on
 
 #include <algorithm>
-#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstdlib>
@@ -42,13 +44,13 @@ depends:
 
 #include "CameraBase.hpp"
 #include "app_framework.hpp"
+#include "gpio.hpp"
 #include "libxr.hpp"
 #include "libxr_system.hpp"
 #include "libxr_string.hpp"
 #include "logger.hpp"
 #include "message.hpp"
 #include "thread.hpp"
-#include "timebase.hpp"
 #include "transform.hpp"
 
 #include <webots/Accelerometer.hpp>
@@ -66,26 +68,27 @@ extern webots::Robot* _libxr_webots_robot_handle;
  * @tparam CameraInfoV 编译期相机模型，必须是紧密排列的 BGR8 图像。
  *
  * @details
- * 模块按 Webots step 读取 `Gyro`、`Accelerometer` 和 `InertialUnit`，
- * 并把原始 IMU 样本发布到 `<device_name>_gyro`、`<device_name>_accl`、
- * `<device_name>_quat`。图像按 `fps` 分频写入 `CameraBase::ImageFrame`。
+ * 模块按 Webots step 读取 `Gyro`、`Accelerometer` 和 `InertialUnit`，并把
+ * 原始 IMU 样本发布到 `<device_name>_gyro`、`<device_name>_accl`、
+ * `<device_name>_quat`。图像不再由本模块按 topic 命令调度，而是把自身注册为
+ * `LibXR::GPIO`，由 CameraSync 像真实 MCU 一样翻转触发线；进入有效电平的边沿
+ * 才提交一帧图像。
  *
- * 所有时间戳来自 libxr Webots timebase，不直接读取 `robot->getTime()`。同步
- * 探针 `sensor_sync_cmd` 只把下一次图像间隔拉长一个基础周期；主机侧根据图像
- * 时间差识别探针位置。
+ * WebotsCamera 只模拟传感器端点。同步命令、分频拉长、seq 回执和 Host/MCU
+ * SharedTopic 边界全部由 CameraSync / CameraFrameSync 负责。
  */
 template <CameraTypes::CameraInfo CameraInfoV>
 class WebotsCamera : public LibXR::Application,
-                     public CameraBase<CameraInfoV>
+                     public CameraBase<CameraInfoV>,
+                     public LibXR::GPIO
 {
  public:
   using Self = WebotsCamera<CameraInfoV>;
   using Base = CameraBase<CameraInfoV>;
   using CameraInfo = typename Base::CameraInfo;
   using ImageFrame = typename Base::ImageFrame;
-  using ImuVector = std::array<float, 3>;
-  using QuatSample = std::array<float, 4>;
-  using SensorSyncCmd = typename Base::SensorSyncCmd;
+  using ImuSample = Eigen::Matrix<float, 3, 1>;
+  using QuatSample = LibXR::Quaternion<float>;
 
   static inline constexpr CameraInfo camera_info = Base::camera_info;
   static constexpr int channel_count = 3;
@@ -144,6 +147,15 @@ class WebotsCamera : public LibXR::Application,
 
     /// 同步后 IMU topic 名。
     std::string_view imu_topic_name = "camera_imu";
+
+    /// 原始 IMU topic domain。实机路径通常是 MCU 域，仿真 detector-only 可改成默认域。
+    std::string_view raw_topic_domain_name = "mcu";
+
+    /// 注册到 HardwareContainer 的相机触发 GPIO 名称，必须与 CameraSync 参数一致。
+    std::string_view trigger_gpio_name = "CAMERA";
+
+    /// 进入该电平的边沿提交图像；true 表示高有效，false 表示低有效。
+    bool trigger_active_level = true;
   };
 
   /**
@@ -161,16 +173,20 @@ class WebotsCamera : public LibXR::Application,
         gyro_device_name_(runtime.pose_def_name, "_gyro"),
         accl_device_name_(runtime.pose_def_name, "_accelerometer"),
         quat_device_name_(runtime.pose_def_name, "_inertial_unit"),
+        raw_topic_domain_name_(runtime.raw_topic_domain_name),
+        raw_topic_domain_(raw_topic_domain_name_.CStr()),
         gyro_topic_name_(runtime.device_name, "_gyro"),
         accl_topic_name_(runtime.device_name, "_accl"),
         quat_topic_name_(runtime.device_name, "_quat"),
-        raw_gyro_topic_(LibXR::Topic::FindOrCreate<ImuVector>(gyro_topic_name_.CStr())),
-        raw_accl_topic_(LibXR::Topic::FindOrCreate<ImuVector>(accl_topic_name_.CStr())),
-        raw_quat_topic_(LibXR::Topic::FindOrCreate<QuatSample>(quat_topic_name_.CStr())),
-        sensor_sync_cmd_topic_(
-            LibXR::Topic::FindOrCreate<SensorSyncCmd>("sensor_sync_cmd")),
-        sensor_sync_cmd_sub_(sensor_sync_cmd_topic_),
-        robot_(_libxr_webots_robot_handle)
+        trigger_gpio_name_(runtime.trigger_gpio_name),
+        raw_gyro_topic_(LibXR::Topic::FindOrCreate<ImuSample>(
+            gyro_topic_name_.CStr(), &raw_topic_domain_)),
+        raw_accl_topic_(LibXR::Topic::FindOrCreate<ImuSample>(
+            accl_topic_name_.CStr(), &raw_topic_domain_)),
+        raw_quat_topic_(LibXR::Topic::FindOrCreate<QuatSample>(
+            quat_topic_name_.CStr(), &raw_topic_domain_)),
+        robot_(_libxr_webots_robot_handle),
+        trigger_active_level_(runtime.trigger_active_level)
   {
     XR_LOG_INFO("Starting WebotsCamera!");
 
@@ -185,6 +201,13 @@ class WebotsCamera : public LibXR::Application,
       XR_LOG_ERROR("WebotsCamera: runtime names must not be empty");
       throw std::invalid_argument("WebotsCamera: required runtime string is empty");
     }
+    if (runtime.raw_topic_domain_name.empty() || runtime.trigger_gpio_name.empty())
+    {
+      XR_LOG_ERROR("WebotsCamera: runtime sync names must not be empty");
+      throw std::invalid_argument("WebotsCamera: sync runtime string is empty");
+    }
+
+    hw.Register(LibXR::Entry<LibXR::GPIO>{*this, {trigger_gpio_name_.CStr()}});
 
     InitRobot();
     InitCamera();
@@ -193,7 +216,6 @@ class WebotsCamera : public LibXR::Application,
     ConfigureSamplingOnStartup();
     ApplyExposure();
     IgnoreUnsupportedGainRequest();
-    sensor_sync_cmd_sub_.StartWaiting();
     StartCaptureThread();
 
     XR_LOG_PASS(
@@ -209,6 +231,41 @@ class WebotsCamera : public LibXR::Application,
 
   /** @brief 当前模块无周期监控输出。 */
   void OnMonitor() override {}
+
+  /** @brief 读取当前仿真触发线电平。 */
+  bool Read() override { return trigger_level_.load(std::memory_order_relaxed); }
+
+  /**
+   * @brief 写入仿真触发线。
+   *
+   * CameraSync 在 MCU 侧 IMU 回调里翻转该 GPIO。这里仅在进入有效电平的边沿提交
+   * 图像，和真实相机触发脚行为一致；同步命令/回执不在本模块处理。
+   */
+  void Write(bool value) override
+  {
+    const bool old = trigger_level_.exchange(value, std::memory_order_relaxed);
+    if (old == value || value != trigger_active_level_)
+    {
+      return;
+    }
+
+    const LibXR::MicrosecondTimestamp timestamp = LibXR::Timebase::GetMicroseconds();
+    CommitImageSample(timestamp);
+    ReportRepeatedFailureIfNeeded();
+  }
+
+  /** @brief Webots 仿真 GPIO 不需要真实中断使能。 */
+  LibXR::ErrorCode EnableInterrupt() override { return LibXR::ErrorCode::OK; }
+
+  /** @brief Webots 仿真 GPIO 不需要真实中断禁用。 */
+  LibXR::ErrorCode DisableInterrupt() override { return LibXR::ErrorCode::OK; }
+
+  /** @brief 保存 GPIO 配置，便于调试时确认 CameraSync 配置过该触发脚。 */
+  LibXR::ErrorCode SetConfig(Configuration config) override
+  {
+    trigger_gpio_config_ = config;
+    return LibXR::ErrorCode::OK;
+  }
 
   /** @brief 更新 Webots Camera 曝光值。 */
   void SetExposure(double exposure) override
@@ -337,11 +394,10 @@ class WebotsCamera : public LibXR::Application,
 
   void ConfigureSamplingOnStartup()
   {
-    // Camera enable 周期决定 Webots 渲染负载；IMU 仍按 Webots step 采样。
+    // Camera enable 周期只决定 Webots 渲染负载；真正提交图像由 GPIO 触发边沿决定。
     base_image_interval_steps_ = ComputePublishIntervalSteps(FpsToPeriodMs(target_fps_),
                                                              time_step_ms_);
     const int camera_sampling_period_ms = base_image_interval_steps_ * time_step_ms_;
-    ResetImageSchedule();
     last_processed_step_ = std::numeric_limits<uint64_t>::max();
     cam_->enable(camera_sampling_period_ms);
   }
@@ -394,49 +450,6 @@ class WebotsCamera : public LibXR::Application,
     return true;
   }
 
-  void ResetImageSchedule()
-  {
-    // 首张图等待一个完整 camera 周期，避免提交 Webots 尚未更新的图像缓存。
-    image_schedule_initialized_ = false;
-    next_image_step_ = 0;
-    next_image_interval_stretched_ = false;
-  }
-
-  void InitializeImageScheduleIfNeeded(uint64_t sim_step)
-  {
-    if (image_schedule_initialized_)
-    {
-      return;
-    }
-
-    image_schedule_initialized_ = true;
-    next_image_step_ = sim_step + static_cast<uint64_t>(base_image_interval_steps_);
-  }
-
-  bool ShouldPublishImageAtStep(uint64_t sim_step) const
-  {
-    return sim_step >= next_image_step_;
-  }
-
-  void StretchNextImageIntervalForProbe()
-  {
-    // 一次性探针只影响下一次图像间隔：N -> 2N -> N。
-    if (!image_schedule_initialized_ || next_image_interval_stretched_)
-    {
-      return;
-    }
-
-    next_image_step_ += static_cast<uint64_t>(base_image_interval_steps_);
-    next_image_interval_stretched_ = true;
-  }
-
-  void AdvanceImageScheduleAfterPublish()
-  {
-    // 当前图发布后恢复基础节拍。
-    next_image_step_ += static_cast<uint64_t>(base_image_interval_steps_);
-    next_image_interval_stretched_ = false;
-  }
-
   // ---- Pose / Motion 采样 ----
 
   void PublishGimbalRotation(const PoseSample& pose)
@@ -451,36 +464,15 @@ class WebotsCamera : public LibXR::Application,
     gimbal_rotation_topic_.Publish(rotation);
   }
 
-  void PollSensorSyncProbeCommand()
-  {
-    if (!sensor_sync_cmd_sub_.Available())
-    {
-      return;
-    }
-
-    const SensorSyncCmd cmd = sensor_sync_cmd_sub_.GetData();
-    sensor_sync_cmd_sub_.StartWaiting();
-    (void)cmd;
-
-    if (next_image_interval_stretched_)
-    {
-      XR_LOG_WARN("WebotsCamera: ignored duplicated sensor_sync_cmd while probe is armed");
-      return;
-    }
-
-    StretchNextImageIntervalForProbe();
-    XR_LOG_INFO("WebotsCamera: accepted sensor_sync_cmd, next image interval stretched");
-  }
-
   void PublishRawImu(const PoseSample& pose, const MotionSample& motion,
                      LibXR::MicrosecondTimestamp timestamp)
   {
-    ImuVector gyro{motion.angular_velocity[0], motion.angular_velocity[1],
-                   motion.angular_velocity[2]};
-    ImuVector accl{motion.linear_acceleration[0], motion.linear_acceleration[1],
-                   motion.linear_acceleration[2]};
-    QuatSample quat{pose.rotation.w(), pose.rotation.x(), pose.rotation.y(),
-                    pose.rotation.z()};
+    ImuSample gyro(motion.angular_velocity[0], motion.angular_velocity[1],
+                   motion.angular_velocity[2]);
+    ImuSample accl(motion.linear_acceleration[0], motion.linear_acceleration[1],
+                   motion.linear_acceleration[2]);
+    QuatSample quat(pose.rotation.w(), pose.rotation.x(), pose.rotation.y(),
+                    pose.rotation.z());
 
     raw_gyro_topic_.Publish(gyro, timestamp);
     raw_accl_topic_.Publish(accl, timestamp);
@@ -613,11 +605,8 @@ class WebotsCamera : public LibXR::Application,
     fail_count = 0;
   }
 
-  void ProcessCaptureStep(uint64_t step, LibXR::MicrosecondTimestamp timestamp)
+  void ProcessCaptureStep(LibXR::MicrosecondTimestamp timestamp)
   {
-    InitializeImageScheduleIfNeeded(step);
-    PollSensorSyncProbeCommand();
-
     PoseSample pose{};
     if (!ReadCameraPoseSample(pose))
     {
@@ -636,14 +625,6 @@ class WebotsCamera : public LibXR::Application,
     ReportSensorReadRecovered("imu motion", motion_read_fail_count_);
 
     PublishRawImu(pose, motion, timestamp);
-    if (!ShouldPublishImageAtStep(step))
-    {
-      return;
-    }
-
-    AdvanceImageScheduleAfterPublish();
-    CommitImageSample(timestamp);
-    ReportRepeatedFailureIfNeeded();
   }
 
   // ---- 采集线程 ----
@@ -670,7 +651,7 @@ class WebotsCamera : public LibXR::Application,
         continue;
       }
 
-      self->ProcessCaptureStep(step, timestamp);
+      self->ProcessCaptureStep(timestamp);
     }
   }
 
@@ -681,9 +662,12 @@ class WebotsCamera : public LibXR::Application,
   LibXR::RuntimeStringView<> gyro_device_name_{};
   LibXR::RuntimeStringView<> accl_device_name_{};
   LibXR::RuntimeStringView<> quat_device_name_{};
+  LibXR::RuntimeStringView<> raw_topic_domain_name_{};
+  LibXR::Topic::Domain raw_topic_domain_;
   LibXR::RuntimeStringView<> gyro_topic_name_{};
   LibXR::RuntimeStringView<> accl_topic_name_{};
   LibXR::RuntimeStringView<> quat_topic_name_{};
+  LibXR::RuntimeStringView<> trigger_gpio_name_{};
   // rotation topic 保持在 gimbal domain，沿用历史消费者的查找路径。
   LibXR::Topic::Domain gimbal_domain_ = LibXR::Topic::Domain("gimbal");
   LibXR::Topic gimbal_rotation_topic_ =
@@ -691,8 +675,6 @@ class WebotsCamera : public LibXR::Application,
   LibXR::Topic raw_gyro_topic_{};
   LibXR::Topic raw_accl_topic_{};
   LibXR::Topic raw_quat_topic_{};
-  LibXR::Topic sensor_sync_cmd_topic_{};
-  LibXR::Topic::ASyncSubscriber<SensorSyncCmd> sensor_sync_cmd_sub_;
 
   webots::Robot* robot_{};
   webots::Camera* cam_ = nullptr;
@@ -708,7 +690,9 @@ class WebotsCamera : public LibXR::Application,
   int pose_read_fail_count_ = 0;
   int motion_read_fail_count_ = 0;
   uint64_t last_processed_step_ = std::numeric_limits<uint64_t>::max();
-  uint64_t next_image_step_{0};
-  bool next_image_interval_stretched_{false};
-  bool image_schedule_initialized_{false};
+  std::atomic<bool> trigger_level_{false};
+  bool trigger_active_level_{true};
+  LibXR::GPIO::Configuration trigger_gpio_config_{
+      .direction = LibXR::GPIO::Direction::OUTPUT_PUSH_PULL,
+      .pull = LibXR::GPIO::Pull::NONE};
 };

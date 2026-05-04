@@ -1,16 +1,17 @@
 # WebotsCamera
 
-WebotsCamera 是 Webots 侧的相机/IMU 数据源。模块只负责采集和发布原始传感器数据：相机提交原始图像，IMU 拆成 gyro / accl / quat 三路 topic。
+WebotsCamera 是 Webots 侧的相机/IMU 传感器端点。模块只负责采集和发布原始传感器数据：IMU 拆成 gyro / accl / quat 三路 topic，相机图像只在触发 GPIO 进入有效电平时提交。
 
-图像与 IMU 的配对由 CameraFrameSync 完成。
+图像触发由 CameraSync 完成；图像与 IMU 的配对由 CameraFrameSync 完成。
 
 ## 功能边界
 
 - 每个 Webots step 发布一组原始 IMU 样本。
-- 图像按 `fps` 分频发布，实际周期量化到 `basicTimeStep`。
+- 注册一个 `LibXR::GPIO` 作为相机触发线，CameraSync 写该 GPIO 后才提交图像。
+- `fps` 只控制 Webots Camera 的底层采样周期，实际图像提交周期由 CameraSync 的分频决定。
 - 图像写入 `CameraBase::ImageFrame`，像素格式固定为紧密排列 BGR8。
 - 传感器时间戳来自 libxr Webots timebase，不直接读取 `robot->getTime()`。
-- `sensor_sync_cmd` 只影响下一次图像间隔，用于同步探针。
+- 同步命令、分频拉长、seq 回执和 Host/MCU SharedTopic 边界不在本模块处理。
 - 模块不做 IMU/图像配对，也不发布同步后的 `ImuStamped`。
 
 ## 运行参数
@@ -24,16 +25,18 @@ WebotsCamera 是 Webots 侧的相机/IMU 数据源。模块只负责采集和发
 | `pose_def_name` | `camera` | IMU 设备名前缀。 |
 | `image_topic_name` | `camera_image` | 原始图像 topic 名。 |
 | `imu_topic_name` | `camera_imu` | 同步后 IMU topic 名，传给 CameraBase 供 CameraFrameSync 发布。 |
+| `raw_topic_domain_name` | `mcu` | 原始 IMU topic domain；detector-only 本进程调试可改为默认域。 |
+| `trigger_gpio_name` | `CAMERA` | 注册给 CameraSync 查找的相机触发 GPIO 名称。 |
+| `trigger_active_level` | `true` | 触发有效电平，进入该电平的边沿提交图像。 |
 
 ## Topic
 
 | Topic | Payload | 时间戳 | 说明 |
 | --- | --- | --- | --- |
-| `<device_name>_gyro` | `std::array<float, 3>` | Topic timestamp | 角速度，单位 rad/s。 |
-| `<device_name>_accl` | `std::array<float, 3>` | Topic timestamp | 线加速度，单位 m/s^2。 |
-| `<device_name>_quat` | `std::array<float, 4>` | Topic timestamp | 姿态四元数，顺序 wxyz。 |
+| `<device_name>_gyro` | `Eigen::Matrix<float, 3, 1>` | Topic timestamp | 角速度，单位 rad/s。 |
+| `<device_name>_accl` | `Eigen::Matrix<float, 3, 1>` | Topic timestamp | 线加速度，单位 m/s^2。 |
+| `<device_name>_quat` | `LibXR::Quaternion<float>` | Topic timestamp | 姿态四元数，顺序 wxyz。 |
 | `image_topic_name` | `CameraBase::ImageFrame` | `ImageFrame::timestamp_us` | 原始 BGR8 图像。 |
-| `sensor_sync_cmd` | `CameraBase::SensorSyncCmd` | 不使用 | 一次性同步探针命令。 |
 | `gimbal/rotation` | `LibXR::Quaternion<float>` | Topic timestamp | 与 `<device_name>_quat` 同源。 |
 
 默认配置下原始 IMU topic 为 `camera_gyro`、`camera_accl`、`camera_quat`。
@@ -44,13 +47,13 @@ libxr Webots timebase 在每次仿真 step 后推进。WebotsCamera 使用 `LibX
 
 模块不调用 `robot->getTime()`。
 
-正常图像间隔为 `N` 个 Webots step。收到 `sensor_sync_cmd` 后，WebotsCamera 把下一张图像延后一个基础图像周期，因此图像间隔表现为：
+正常图像触发间隔为 CameraSync 的 `trigger_div` 个 IMU 样本。收到同步命令后，CameraSync 会把一段反向电平周期临时拉长，然后在下一个有效电平边沿触发同步点；WebotsCamera 只响应 GPIO 边沿，不读取同步命令。
 
 ```text
-N -> 2N -> N
+IMU topic -> CameraSync -> GPIO edge -> WebotsCamera CommitImage()
 ```
 
-CameraFrameSync 根据图像传感器时间差识别探针位置，再在 IMU 时间轴中选帧。WebotsCamera 不比较图像时间戳和 IMU 时间戳，也不发布同步结果。
+CameraFrameSync 根据 CameraSync 回执 topic 的消息时间戳锁定 IMU 时间轴，再为图像选择对应 IMU。WebotsCamera 不比较图像时间戳和 IMU 时间戳，也不发布同步结果。
 
 ## 坐标系
 

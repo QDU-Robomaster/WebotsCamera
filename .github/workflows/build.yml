@@ -32,10 +32,11 @@ jobs:
       - name: Pull libxr
         run: git clone --depth=1 https://github.com/Jiu-xiao/libxr ./libxr
 
-      - name: Install OpenCV with aruco
+      - name: Check OpenCV with aruco
         run: |
-          apt-get update
-          apt-get install -y --no-install-recommends libopencv-dev
+          pkg-config --modversion opencv4
+          test "$(pkg-config --modversion opencv4)" = "4.13.0"
+          test -f "${OpenCV_DIR}/OpenCVConfig.cmake"
 
       - name: Install xrobot
         run: |
@@ -110,5 +111,5 @@ jobs:
 
       - name: Build
         run: |
-          cmake -S . -B build -DOpenCV_DIR=/usr/lib/x86_64-linux-gnu/cmake/opencv4
+          cmake -S . -B build
           cmake --build build -j2

@@ -249,9 +249,9 @@ class WebotsCamera : public LibXR::Application,
       return;
     }
 
-    const LibXR::MicrosecondTimestamp timestamp = LibXR::Timebase::GetMicroseconds();
-    CommitImageSample(timestamp);
-    ReportRepeatedFailureIfNeeded();
+    const uint64_t timestamp_us =
+        static_cast<uint64_t>(LibXR::Timebase::GetMicroseconds());
+    pending_trigger_timestamp_us_.store(timestamp_us, std::memory_order_release);
   }
 
   /** @brief Webots 仿真 GPIO 不需要真实中断使能。 */
@@ -625,6 +625,28 @@ class WebotsCamera : public LibXR::Application,
     ReportSensorReadRecovered("imu motion", motion_read_fail_count_);
 
     PublishRawImu(pose, motion, timestamp);
+    CommitTriggeredImageIfReady(timestamp);
+  }
+
+  void CommitTriggeredImageIfReady(LibXR::MicrosecondTimestamp timestamp)
+  {
+    const uint64_t current_timestamp_us = static_cast<uint64_t>(timestamp);
+    uint64_t trigger_timestamp_us =
+        pending_trigger_timestamp_us_.load(std::memory_order_acquire);
+    if (trigger_timestamp_us != current_timestamp_us)
+    {
+      return;
+    }
+
+    if (!pending_trigger_timestamp_us_.compare_exchange_strong(
+            trigger_timestamp_us, 0ULL, std::memory_order_acq_rel,
+            std::memory_order_acquire))
+    {
+      return;
+    }
+
+    CommitImageSample(timestamp);
+    ReportRepeatedFailureIfNeeded();
   }
 
   // ---- 采集线程 ----
@@ -686,6 +708,7 @@ class WebotsCamera : public LibXR::Application,
 
   std::atomic<bool> running_{false};
   LibXR::Thread capture_thread_{};
+  std::atomic<uint64_t> pending_trigger_timestamp_us_{0};
   int consecutive_fail_count_ = 0;
   int pose_read_fail_count_ = 0;
   int motion_read_fail_count_ = 0;

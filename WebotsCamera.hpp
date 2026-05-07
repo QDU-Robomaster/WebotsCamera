@@ -257,8 +257,13 @@ class WebotsCamera : public LibXR::Application,
       return;
     }
 
-    const uint64_t timestamp_us =
-        static_cast<uint64_t>(LibXR::Timebase::GetMicroseconds());
+    uint64_t timestamp_us =
+        current_raw_imu_timestamp_us_.load(std::memory_order_acquire);
+    if (timestamp_us == 0ULL)
+    {
+      timestamp_us =
+          static_cast<uint64_t>(LibXR::Timebase::GetMicroseconds());
+    }
     pending_trigger_timestamp_us_.store(timestamp_us, std::memory_order_release);
   }
 
@@ -473,6 +478,9 @@ class WebotsCamera : public LibXR::Application,
   void PublishRawImu(const PoseSample& pose, const MotionSample& motion,
                      LibXR::MicrosecondTimestamp timestamp)
   {
+    current_raw_imu_timestamp_us_.store(static_cast<uint64_t>(timestamp),
+                                        std::memory_order_release);
+
     ImuSample gyro(motion.angular_velocity[0], motion.angular_velocity[1],
                    motion.angular_velocity[2]);
     ImuSample accl(motion.linear_acceleration[0], motion.linear_acceleration[1],
@@ -639,7 +647,7 @@ class WebotsCamera : public LibXR::Application,
     const uint64_t current_timestamp_us = static_cast<uint64_t>(timestamp);
     uint64_t trigger_timestamp_us =
         pending_trigger_timestamp_us_.load(std::memory_order_acquire);
-    if (trigger_timestamp_us != current_timestamp_us)
+    if (trigger_timestamp_us == 0ULL || trigger_timestamp_us > current_timestamp_us)
     {
       return;
     }
@@ -651,11 +659,20 @@ class WebotsCamera : public LibXR::Application,
       return;
     }
 
-    CommitImageSample(timestamp);
+    CommitImageSample(
+        static_cast<LibXR::MicrosecondTimestamp>(trigger_timestamp_us));
     ReportRepeatedFailureIfNeeded();
   }
 
   // ---- 采集线程 ----
+
+  LibXR::MicrosecondTimestamp AdvanceSyntheticCaptureTimestamp()
+  {
+    synthetic_capture_timestamp_us_ +=
+        static_cast<uint64_t>(time_step_ms_) * 1000ULL;
+    return static_cast<LibXR::MicrosecondTimestamp>(
+        synthetic_capture_timestamp_us_);
+  }
 
   static void CaptureThreadMain(Self* self)
   {
@@ -679,7 +696,7 @@ class WebotsCamera : public LibXR::Application,
         continue;
       }
 
-      self->ProcessCaptureStep(timestamp);
+      self->ProcessCaptureStep(self->AdvanceSyntheticCaptureTimestamp());
     }
   }
 
@@ -715,6 +732,7 @@ class WebotsCamera : public LibXR::Application,
   std::atomic<bool> running_{false};
   std::thread capture_thread_{};
   std::atomic<uint64_t> pending_trigger_timestamp_us_{0};
+  std::atomic<uint64_t> current_raw_imu_timestamp_us_{0};
   int consecutive_fail_count_ = 0;
   int pose_read_fail_count_ = 0;
   int motion_read_fail_count_ = 0;
@@ -724,4 +742,5 @@ class WebotsCamera : public LibXR::Application,
   LibXR::GPIO::Configuration trigger_gpio_config_{
       .direction = LibXR::GPIO::Direction::OUTPUT_PUSH_PULL,
       .pull = LibXR::GPIO::Pull::NONE};
+  uint64_t synthetic_capture_timestamp_us_{0};
 };

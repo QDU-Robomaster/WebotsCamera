@@ -38,6 +38,7 @@ depends:
 #include <limits>
 #include <stdexcept>
 #include <string_view>
+#include <thread>
 
 #include <opencv2/core/mat.hpp>
 #include <opencv2/imgproc.hpp>
@@ -227,7 +228,14 @@ class WebotsCamera : public LibXR::Application,
   }
 
   /** @brief 请求采集线程退出。 */
-  ~WebotsCamera() { running_.store(false); }
+  ~WebotsCamera()
+  {
+    running_.store(false);
+    if (capture_thread_.joinable())
+    {
+      capture_thread_.join();
+    }
+  }
 
   /** @brief 当前模块无周期监控输出。 */
   void OnMonitor() override {}
@@ -404,11 +412,9 @@ class WebotsCamera : public LibXR::Application,
 
   void StartCaptureThread()
   {
-    // REALTIME 线程会被 libxr Webots timebase 纳入 step 推进屏障。
+    // 采集线程只做 Webots 设备采样和 topic 发布，不提升到 libxr RT 调度。
     running_.store(true);
-    capture_thread_.Create(this, CaptureThreadMain, "WebotsCameraThread",
-                           static_cast<size_t>(1024 * 128),
-                           LibXR::Thread::Priority::REALTIME);
+    capture_thread_ = std::thread(CaptureThreadMain, this);
   }
 
   void ApplyExposure()
@@ -707,7 +713,7 @@ class WebotsCamera : public LibXR::Application,
   int base_image_interval_steps_ = 1;
 
   std::atomic<bool> running_{false};
-  LibXR::Thread capture_thread_{};
+  std::thread capture_thread_{};
   std::atomic<uint64_t> pending_trigger_timestamp_us_{0};
   int consecutive_fail_count_ = 0;
   int pose_read_fail_count_ = 0;

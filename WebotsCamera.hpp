@@ -38,7 +38,6 @@ depends:
 #include <limits>
 #include <stdexcept>
 #include <string_view>
-#include <thread>
 
 #include <opencv2/core/mat.hpp>
 #include <opencv2/imgproc.hpp>
@@ -231,10 +230,6 @@ class WebotsCamera : public LibXR::Application,
   ~WebotsCamera()
   {
     running_.store(false);
-    if (capture_thread_.joinable())
-    {
-      capture_thread_.join();
-    }
   }
 
   /** @brief 当前模块无周期监控输出。 */
@@ -417,9 +412,10 @@ class WebotsCamera : public LibXR::Application,
 
   void StartCaptureThread()
   {
-    // 采集线程只做 Webots 设备采样和 topic 发布，不提升到 libxr RT 调度。
+    // 采集线程参与 Webots step 栅栏，保证 IMU / image 传感器时间和仿真步一致。
     running_.store(true);
-    capture_thread_ = std::thread(CaptureThreadMain, this);
+    capture_thread_.Create<Self*>(this, CaptureThreadMain, "webots_camera", 8192,
+                                  LibXR::Thread::Priority::REALTIME);
   }
 
   void ApplyExposure()
@@ -666,14 +662,6 @@ class WebotsCamera : public LibXR::Application,
 
   // ---- 采集线程 ----
 
-  LibXR::MicrosecondTimestamp AdvanceSyntheticCaptureTimestamp()
-  {
-    synthetic_capture_timestamp_us_ +=
-        static_cast<uint64_t>(time_step_ms_) * 1000ULL;
-    return static_cast<LibXR::MicrosecondTimestamp>(
-        synthetic_capture_timestamp_us_);
-  }
-
   static void CaptureThreadMain(Self* self)
   {
     XR_LOG_INFO("Publishing image!");
@@ -688,15 +676,17 @@ class WebotsCamera : public LibXR::Application,
       // Sleep 挂到 libxr Webots timebase；时间戳取同一套仿真时间基。
       LibXR::Thread::Sleep(self->time_step_ms_);
 
-      const LibXR::MicrosecondTimestamp timestamp = LibXR::Timebase::GetMicroseconds();
       const uint64_t step_us = static_cast<uint64_t>(self->time_step_ms_) * 1000ULL;
-      const uint64_t step = static_cast<uint64_t>(timestamp) / step_us;
+      const auto webots_time_us = static_cast<uint64_t>(
+          std::llround(self->robot_->getTime() * 1000000.0));
+      const uint64_t step = webots_time_us / step_us;
       if (!self->EnterNewStep(step))
       {
         continue;
       }
 
-      self->ProcessCaptureStep(self->AdvanceSyntheticCaptureTimestamp());
+      self->ProcessCaptureStep(
+          static_cast<LibXR::MicrosecondTimestamp>(webots_time_us));
     }
   }
 
@@ -730,7 +720,7 @@ class WebotsCamera : public LibXR::Application,
   int base_image_interval_steps_ = 1;
 
   std::atomic<bool> running_{false};
-  std::thread capture_thread_{};
+  LibXR::Thread capture_thread_{};
   std::atomic<uint64_t> pending_trigger_timestamp_us_{0};
   std::atomic<uint64_t> current_raw_imu_timestamp_us_{0};
   int consecutive_fail_count_ = 0;
@@ -742,5 +732,4 @@ class WebotsCamera : public LibXR::Application,
   LibXR::GPIO::Configuration trigger_gpio_config_{
       .direction = LibXR::GPIO::Direction::OUTPUT_PUSH_PULL,
       .pull = LibXR::GPIO::Pull::NONE};
-  uint64_t synthetic_capture_timestamp_us_{0};
 };

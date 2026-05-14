@@ -459,16 +459,16 @@ class WebotsCamera : public LibXR::Application,
 
   // ---- Pose / Motion 采样 ----
 
-  void PublishGimbalRotation(const PoseSample& pose)
+  void PublishGimbalQuat(const PoseSample& pose,
+                         LibXR::MicrosecondTimestamp timestamp)
   {
 #if LIBXR_LOG_LEVEL >= 4
     const LibXR::EulerAngle<float> eulr = pose.rotation.ToEulerAngle();
     XR_LOG_DEBUG("WebotsCamera: camera euler roll_x=%.3f pitch_y=%.3f yaw_z=%.3f",
                  eulr.Roll(), eulr.Pitch(), eulr.Yaw());
 #endif
-    // 沿用 gimbal 域历史 topic；数据与 camera_quat 同源。
     auto rotation = pose.rotation;
-    gimbal_rotation_topic_.Publish(rotation);
+    gimbal_quat_topic_.Publish(rotation, timestamp);
   }
 
   void PublishRawImu(const PoseSample& pose, const MotionSample& motion,
@@ -624,7 +624,7 @@ class WebotsCamera : public LibXR::Application,
       return;
     }
     ReportSensorReadRecovered("pose", pose_read_fail_count_);
-    PublishGimbalRotation(pose);
+    PublishGimbalQuat(pose, timestamp);
 
     MotionSample motion{};
     if (!ReadImuMotionSample(motion))
@@ -703,10 +703,10 @@ class WebotsCamera : public LibXR::Application,
   LibXR::RuntimeStringView<> accl_topic_name_{};
   LibXR::RuntimeStringView<> quat_topic_name_{};
   LibXR::RuntimeStringView<> trigger_gpio_name_{};
-  // rotation topic 保持在 gimbal domain，沿用历史消费者的查找路径。
-  LibXR::Topic::Domain gimbal_domain_ = LibXR::Topic::Domain("gimbal");
-  LibXR::Topic gimbal_rotation_topic_ =
-      LibXR::Topic::FindOrCreate<LibXR::Quaternion<float>>("rotation", &gimbal_domain_);
+  LibXR::Topic::Domain host_domain_ = LibXR::Topic::Domain("host");
+  LibXR::Topic gimbal_quat_topic_ =
+      LibXR::Topic::FindOrCreate<LibXR::Quaternion<float>>("gimbal_quat",
+                                                           &host_domain_);
   LibXR::Topic raw_gyro_topic_{};
   LibXR::Topic raw_accl_topic_{};
   LibXR::Topic raw_quat_topic_{};

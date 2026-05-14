@@ -37,7 +37,7 @@ WebotsCamera 是 Webots 侧的相机/IMU 传感器端点。模块只负责采集
 | `<device_name>_accl` | `Eigen::Matrix<float, 3, 1>` | Topic timestamp | 线加速度，单位 m/s^2。 |
 | `<device_name>_quat` | `LibXR::Quaternion<float>` | Topic timestamp | 姿态四元数，顺序 wxyz。 |
 | `image_topic_name` | `CameraBase::ImageFrame` | `ImageFrame::timestamp_us` | 原始 BGR8 图像。 |
-| `gimbal/rotation` | `LibXR::Quaternion<float>` | Topic timestamp | 与 `<device_name>_quat` 同源。 |
+| `host/gimbal_quat` | `LibXR::Quaternion<float>` | Topic timestamp | C 板同名姿态 topic，数据与 `<device_name>_quat` 同源。 |
 
 默认配置下原始 IMU topic 为 `camera_gyro`、`camera_accl`、`camera_quat`。
 
@@ -64,7 +64,7 @@ Webots world 必须把 Camera、Gyro、Accelerometer、InertialUnit 安装成同
 - `y` 向前。
 - `z` 向上。
 
-`camera_quat`、`camera_gyro`、`camera_accl`、`gimbal/rotation` 均使用这套坐标系。角速度正方向遵循各轴右手定则。
+`camera_quat`、`camera_gyro`、`camera_accl`、`host/gimbal_quat` 均使用这套坐标系。角速度正方向遵循各轴右手定则。
 
 模块不做运行时零位标定，也不补偿 world 中的安装误差；坐标错误应在 world 中修正。
 
@@ -76,7 +76,7 @@ Webots world 必须把 Camera、Gyro、Accelerometer、InertialUnit 安装成同
 - `camera_accelerometer`
 - `camera_inertial_unit`
 
-三类 IMU 设备应与 Camera 节点共用同一坐标定义。`camera_quat` 和 `gimbal/rotation` 均来自 `InertialUnit::getQuaternion()`。
+三类 IMU 设备应与 Camera 节点共用同一坐标定义。`camera_quat` 和 `host/gimbal_quat` 均来自 `InertialUnit::getQuaternion()`。
 
 Webots 返回的 xyzw 会在模块内转换为 wxyz。
 

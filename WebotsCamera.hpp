@@ -459,6 +459,24 @@ class WebotsCamera : public LibXR::Application,
 
   // ---- Pose / Motion 采样 ----
 
+  static LibXR::Quaternion<float> WebotsRawImuToPublicBodyQuat(
+      const LibXR::Quaternion<float>& sensor)
+  {
+    // The current Webots IMU mount reports +X as camera-down. Convert it to
+    // the public body frame B, where +X roll raises the forward optical ray.
+    const LibXR::Quaternion<float> webots_raw_to_body(
+        0.0f, 0.0f, 0.0f, 1.0f);
+    const LibXR::Quaternion<float> body_to_webots_raw(
+        0.0f, 0.0f, 0.0f, -1.0f);
+    return webots_raw_to_body * sensor * body_to_webots_raw;
+  }
+
+  static LibXR::Position<float> WebotsRawImuToPublicBodyVector(
+      const LibXR::Position<float>& vector)
+  {
+    return LibXR::Position<float>(-vector[0], -vector[1], vector[2]);
+  }
+
   void PublishGimbalQuat(const PoseSample& pose,
                          LibXR::MicrosecondTimestamp timestamp)
   {
@@ -467,7 +485,7 @@ class WebotsCamera : public LibXR::Application,
     XR_LOG_DEBUG("WebotsCamera: camera euler roll_x=%.3f pitch_y=%.3f yaw_z=%.3f",
                  eulr.Roll(), eulr.Pitch(), eulr.Yaw());
 #endif
-    auto rotation = pose.rotation;
+    auto rotation = WebotsRawImuToPublicBodyQuat(pose.rotation);
     gimbal_quat_topic_.Publish(rotation, timestamp);
   }
 
@@ -477,12 +495,17 @@ class WebotsCamera : public LibXR::Application,
     current_raw_imu_timestamp_us_.store(static_cast<uint64_t>(timestamp),
                                         std::memory_order_release);
 
-    ImuSample gyro(motion.angular_velocity[0], motion.angular_velocity[1],
-                   motion.angular_velocity[2]);
-    ImuSample accl(motion.linear_acceleration[0], motion.linear_acceleration[1],
-                   motion.linear_acceleration[2]);
-    QuatSample quat(pose.rotation.w(), pose.rotation.x(), pose.rotation.y(),
-                    pose.rotation.z());
+    const auto angular_velocity =
+        WebotsRawImuToPublicBodyVector(motion.angular_velocity);
+    const auto linear_acceleration =
+        WebotsRawImuToPublicBodyVector(motion.linear_acceleration);
+    const auto rotation = WebotsRawImuToPublicBodyQuat(pose.rotation);
+
+    ImuSample gyro(angular_velocity[0], angular_velocity[1],
+                   angular_velocity[2]);
+    ImuSample accl(linear_acceleration[0], linear_acceleration[1],
+                   linear_acceleration[2]);
+    QuatSample quat(rotation.w(), rotation.x(), rotation.y(), rotation.z());
 
     raw_gyro_topic_.Publish(gyro, timestamp);
     raw_accl_topic_.Publish(accl, timestamp);

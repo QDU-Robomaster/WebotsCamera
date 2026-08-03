@@ -10,6 +10,8 @@ constructor_args:
       exposure: 1.0
       gain: 0.0
       pose_def_name: "camera"
+      image_topic_name: "camera_image"
+      imu_topic_name: "camera_imu"
       raw_topic_domain_name: "mcu"
       trigger_gpio_name: "CAMERA"
       trigger_active_level: true
@@ -19,11 +21,11 @@ template_args:
       height: 720
       step: 3840
       encoding: CameraTypes::Encoding::BGR8
-      camera_matrix: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+      camera_matrix: [800.0, 0.0, 640.0, 0.0, 800.0, 360.0, 0.0, 0.0, 1.0]
       distortion_model: CameraTypes::DistortionModel::PLUMB_BOB
       distortion_coefficients: [0.0, 0.0, 0.0, 0.0, 0.0]
       rectification_matrix: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
-      projection_matrix: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      projection_matrix: [800.0, 0.0, 640.0, 0.0, 0.0, 800.0, 360.0, 0.0, 0.0, 0.0, 1.0, 0.0]
 required_hardware: []
 depends:
   - qdu-future/CameraBase

@@ -4,7 +4,15 @@
 /* === MODULE MANIFEST V2 ===
 module_description: Webots 相机与 IMU 采集端
 constructor_args:
-  - runtime:
+  calibration:
+    native_width: 1280
+    native_height: 720
+    camera_matrix: [800.0, 0.0, 640.0, 0.0, 800.0, 360.0, 0.0, 0.0, 1.0]
+    distortion_model: CameraTypes::DistortionModel::PLUMB_BOB
+    distortion_coefficients: [0.0, 0.0, 0.0, 0.0, 0.0]
+    rectification_matrix: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+    projection_matrix: [800.0, 0.0, 640.0, 0.0, 0.0, 800.0, 360.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+  runtime:
       device_name: "camera"
       fps: 30
       exposure: 1.0
@@ -15,17 +23,13 @@ constructor_args:
       raw_topic_domain_name: "mcu"
       trigger_gpio_name: "CAMERA"
       trigger_active_level: true
+      trigger_period_us: 20000
 template_args:
-  - Info:
+  - Layout:
       width: 1280
       height: 720
       step: 3840
       encoding: CameraTypes::Encoding::BGR8
-      camera_matrix: [800.0, 0.0, 640.0, 0.0, 800.0, 360.0, 0.0, 0.0, 1.0]
-      distortion_model: CameraTypes::DistortionModel::PLUMB_BOB
-      distortion_coefficients: [0.0, 0.0, 0.0, 0.0, 0.0]
-      rectification_matrix: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
-      projection_matrix: [800.0, 0.0, 640.0, 0.0, 0.0, 800.0, 360.0, 0.0, 0.0, 0.0, 1.0, 0.0]
 required_hardware: []
 depends:
   - qdu-future/CameraBase
@@ -33,6 +37,8 @@ depends:
 // clang-format on
 
 #include <algorithm>
+#include <array>
+#include <span>
 #include <atomic>
 #include <cmath>
 #include <cstdlib>
@@ -67,7 +73,7 @@ extern webots::Robot* _libxr_webots_robot_handle;
  * @class WebotsCamera
  * @brief Webots 仿真环境中的相机与 IMU 数据源。
  *
- * @tparam CameraInfoV 编译期相机模型，必须是紧密排列的 BGR8 图像。
+ * @tparam FrameLayoutV 编译期图像存储布局，必须是紧密排列的 BGR8 图像。
  *
  * @details
  * 模块按 Webots step 读取 `Gyro`、`Accelerometer` 和 `InertialUnit`，并把
@@ -79,28 +85,35 @@ extern webots::Robot* _libxr_webots_robot_handle;
  * WebotsCamera 只模拟传感器端点。同步命令、分频拉长、seq 回执和 Host/MCU
  * SharedTopic 边界全部由 CameraSync / CameraFrameSync 负责。
  */
-template <CameraTypes::CameraInfo CameraInfoV>
+template <CameraTypes::FrameLayout FrameLayoutV>
 class WebotsCamera : public LibXR::Application,
-                     public CameraBase<CameraInfoV>,
+                     public CameraBase<FrameLayoutV>,
                      public LibXR::GPIO
 {
  public:
-  using Self = WebotsCamera<CameraInfoV>;
-  using Base = CameraBase<CameraInfoV>;
-  using CameraInfo = typename Base::CameraInfo;
+  using Self = WebotsCamera<FrameLayoutV>;
+  using Base = CameraBase<FrameLayoutV>;
+  using CameraCalibration = typename Base::CameraCalibration;
+  using CameraProfile = typename Base::CameraProfile;
+  using AppliedProfile = typename Base::AppliedProfile;
+  using ProfileId = typename Base::ProfileId;
   using ImageFrame = typename Base::ImageFrame;
   using ImuSample = Eigen::Matrix<float, 3, 1>;
   using QuatSample = LibXR::Quaternion<float>;
 
-  static inline constexpr CameraInfo camera_info = Base::camera_info;
+  static inline constexpr auto frame_layout = Base::frame_layout;
   static constexpr int channel_count = 3;
-  static constexpr int frame_width = static_cast<int>(camera_info.width);
-  static constexpr int frame_height = static_cast<int>(camera_info.height);
-  static constexpr std::size_t frame_step = static_cast<std::size_t>(camera_info.step);
+  static constexpr int frame_width = static_cast<int>(frame_layout.width);
+  static constexpr int frame_height = static_cast<int>(frame_layout.height);
+  static constexpr std::size_t frame_step = static_cast<std::size_t>(frame_layout.step);
+  static inline constexpr CameraTypes::FrameGeometry frame_geometry{
+      .width = frame_layout.width, .height = frame_layout.height,
+      .step = frame_layout.step, .roi_offset_x_native = 0, .roi_offset_y_native = 0,
+      .decimation_x = 1, .decimation_y = 1};
 
-  static_assert(camera_info.encoding == CameraTypes::Encoding::BGR8,
+  static_assert(frame_layout.encoding == CameraTypes::Encoding::BGR8,
                 "WebotsCamera requires BGR8 output encoding");
-  static_assert(frame_step == static_cast<std::size_t>(camera_info.width) * channel_count,
+  static_assert(frame_step == static_cast<std::size_t>(frame_layout.width) * channel_count,
                 "WebotsCamera requires packed BGR step");
 
   /**
@@ -158,6 +171,9 @@ class WebotsCamera : public LibXR::Application,
 
     /// 进入该电平的边沿提交图像；true 表示高有效，false 表示低有效。
     bool trigger_active_level = true;
+
+    /// 固定 WIDE 档位的触发周期，单位 us；与相机渲染采样频率分别配置。
+    uint32_t trigger_period_us = 20000;
   };
 
   /**
@@ -167,8 +183,8 @@ class WebotsCamera : public LibXR::Application,
    * @param runtime 运行时参数。
    */
   explicit WebotsCamera(LibXR::HardwareContainer& hw, LibXR::ApplicationManager& app,
-                        RuntimeParam runtime)
-      : Base(hw, runtime.device_name, runtime.image_topic_name, runtime.imu_topic_name),
+                        CameraCalibration calibration, RuntimeParam runtime)
+      : Base(hw, calibration, runtime.device_name, runtime.image_topic_name, runtime.imu_topic_name),
         target_fps_(runtime.fps),
         exposure_(runtime.exposure),
         gain_(runtime.gain),
@@ -209,6 +225,13 @@ class WebotsCamera : public LibXR::Application,
       throw std::invalid_argument("WebotsCamera: sync runtime string is empty");
     }
 
+    if (runtime.trigger_period_us == 0 ||
+        calibration.native_width != frame_layout.width ||
+        calibration.native_height != frame_layout.height)
+    {
+      throw std::invalid_argument("WebotsCamera requires a nonzero trigger period and native frame calibration");
+    }
+    profiles_[0] = {ProfileId::WIDE, frame_geometry, runtime.trigger_period_us};
     hw.Register(LibXR::Entry<LibXR::GPIO>{*this, {trigger_gpio_name_.CStr()}});
 
     InitRobot();
@@ -236,6 +259,21 @@ class WebotsCamera : public LibXR::Application,
 
   /** @brief 当前模块无周期监控输出。 */
   void OnMonitor() override {}
+
+  [[nodiscard]] std::span<const CameraProfile> Profiles() const noexcept override
+  {
+    return profiles_;
+  }
+
+  LibXR::ErrorCode SwitchProfile(ProfileId id, AppliedProfile& applied) override
+  {
+    if (id != ProfileId::WIDE)
+    {
+      return LibXR::ErrorCode::NOT_SUPPORT;
+    }
+    applied = {ProfileId::WIDE, frame_geometry};
+    return LibXR::ErrorCode::OK;
+  }
 
   /** @brief 读取当前仿真触发线电平。 */
   bool Read() override { return trigger_level_.load(std::memory_order_relaxed); }
@@ -389,16 +427,16 @@ class WebotsCamera : public LibXR::Application,
     const uint32_t actual_height = static_cast<uint32_t>(cam_->getHeight());
     const uint32_t packed_step = actual_width * channel_count;
 
-    if (camera_info.width == actual_width && camera_info.height == actual_height &&
-        camera_info.step == packed_step)
+    if (frame_layout.width == actual_width && frame_layout.height == actual_height &&
+        frame_layout.step == packed_step)
     {
       return;
     }
 
     XR_LOG_ERROR(
         "WebotsCamera: constexpr geometry mismatch width=%u/%u height=%u/%u step=%u/%u",
-        camera_info.width, actual_width, camera_info.height, actual_height,
-        camera_info.step, packed_step);
+        frame_layout.width, actual_width, frame_layout.height, actual_height,
+        frame_layout.step, packed_step);
     throw std::runtime_error("WebotsCamera: constexpr geometry mismatch");
   }
 
@@ -567,11 +605,6 @@ class WebotsCamera : public LibXR::Application,
 
   bool WriteAndCommitImage(const unsigned char* rgba, LibXR::MicrosecondTimestamp timestamp)
   {
-    if (!this->ImageSinkReady())
-    {
-      return false;
-    }
-
     ImageFrame* image = this->GetWritableImage();
     if (image == nullptr)
     {
@@ -580,7 +613,8 @@ class WebotsCamera : public LibXR::Application,
       return false;
     }
 
-    image->timestamp_us = static_cast<uint64_t>(timestamp);
+    image->timestamp_us = timestamp;
+    image->geometry = frame_geometry;
 
     cv::Mat src(frame_height, frame_width, CV_8UC4, const_cast<unsigned char*>(rgba));
     cv::Mat dst(frame_height, frame_width, CV_8UC3, image->data.data(), frame_step);
@@ -716,6 +750,7 @@ class WebotsCamera : public LibXR::Application,
   }
 
  private:
+  std::array<CameraProfile, 1> profiles_{};
   int target_fps_ = 30;
   double exposure_ = 1.0;
   double gain_ = 0.0;

@@ -3,69 +3,40 @@
 // clang-format off
 /* === MODULE MANIFEST V2 ===
 module_description: Webots 相机与 IMU 采集端
-constructor_args:
-  calibration:
-    native_width: 1280
-    native_height: 720
-    camera_matrix: [800.0, 0.0, 640.0, 0.0, 800.0, 360.0, 0.0, 0.0, 1.0]
-    distortion_model: CameraTypes::DistortionModel::PLUMB_BOB
-    distortion_coefficients: [0.0, 0.0, 0.0, 0.0, 0.0]
-    rectification_matrix: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
-    projection_matrix: [800.0, 0.0, 640.0, 0.0, 0.0, 800.0, 360.0, 0.0, 0.0, 0.0, 1.0, 0.0]
-  runtime:
-      device_name: "camera"
-      fps: 30
-      exposure: 1.0
-      gain: 0.0
-      pose_def_name: "camera"
-      image_topic_name: "camera_image"
-      imu_topic_name: "camera_imu"
-      raw_topic_domain_name: "mcu"
-      trigger_gpio_name: "CAMERA"
-      trigger_active_level: true
-      trigger_period_us: 20000
-template_args:
-  - Layout:
-      width: 1280
-      height: 720
-      step: 3840
-      encoding: CameraTypes::Encoding::BGR8
-required_hardware: []
 depends:
-  - qdu-future/CameraBase
+- id: QDU-Robomaster/CameraBase
+  ref: same-or-dev
 === END MANIFEST === */
 // clang-format on
 
 #include <algorithm>
 #include <array>
-#include <span>
 #include <atomic>
 #include <cmath>
-#include <cstdlib>
 #include <cstdint>
+#include <cstdlib>
 #include <limits>
-#include <stdexcept>
-#include <string_view>
-
 #include <opencv2/core/mat.hpp>
 #include <opencv2/imgproc.hpp>
-
-#include "CameraBase.hpp"
-#include "app_framework.hpp"
-#include "gpio.hpp"
-#include "libxr.hpp"
-#include "libxr_system.hpp"
-#include "libxr_string.hpp"
-#include "logger.hpp"
-#include "message.hpp"
-#include "thread.hpp"
-#include "transform.hpp"
-
+#include <span>
+#include <stdexcept>
+#include <string_view>
 #include <webots/Accelerometer.hpp>
 #include <webots/Camera.hpp>
 #include <webots/Gyro.hpp>
 #include <webots/InertialUnit.hpp>
 #include <webots/Robot.hpp>
+
+#include "CameraBase.hpp"
+#include "gpio.hpp"
+#include "libxr.hpp"
+#include "libxr_string.hpp"
+#include "libxr_system.hpp"
+#include "logger.hpp"
+#include "message.hpp"
+#include "ramfs.hpp"
+#include "thread.hpp"
+#include "transform.hpp"
 
 extern webots::Robot* _libxr_webots_robot_handle;
 
@@ -86,9 +57,7 @@ extern webots::Robot* _libxr_webots_robot_handle;
  * SharedTopic 边界全部由 CameraSync / CameraFrameSync 负责。
  */
 template <CameraTypes::FrameLayout FrameLayoutV>
-class WebotsCamera : public LibXR::Application,
-                     public CameraBase<FrameLayoutV>,
-                     public LibXR::GPIO
+class WebotsCamera : public CameraBase<FrameLayoutV>, public LibXR::GPIO
 {
  public:
   using Self = WebotsCamera<FrameLayoutV>;
@@ -107,13 +76,18 @@ class WebotsCamera : public LibXR::Application,
   static constexpr int frame_height = static_cast<int>(frame_layout.height);
   static constexpr std::size_t frame_step = static_cast<std::size_t>(frame_layout.step);
   static inline constexpr CameraTypes::FrameGeometry frame_geometry{
-      .width = frame_layout.width, .height = frame_layout.height,
-      .step = frame_layout.step, .roi_offset_x_native = 0, .roi_offset_y_native = 0,
-      .decimation_x = 1, .decimation_y = 1};
+      .width = frame_layout.width,
+      .height = frame_layout.height,
+      .step = frame_layout.step,
+      .roi_offset_x_native = 0,
+      .roi_offset_y_native = 0,
+      .decimation_x = 1,
+      .decimation_y = 1};
 
   static_assert(frame_layout.encoding == CameraTypes::Encoding::BGR8,
                 "WebotsCamera requires BGR8 output encoding");
-  static_assert(frame_step == static_cast<std::size_t>(frame_layout.width) * channel_count,
+  static_assert(frame_step ==
+                    static_cast<std::size_t>(frame_layout.width) * channel_count,
                 "WebotsCamera requires packed BGR step");
 
   /**
@@ -122,7 +96,7 @@ class WebotsCamera : public LibXR::Application,
    */
   struct PoseSample
   {
-    LibXR::Quaternion<float> rotation{};  ///< 发布坐标系相对 world 的姿态，wxyz。
+    LibXR::Quaternion<float> rotation{};   ///< 发布坐标系相对 world 的姿态，wxyz。
     LibXR::Position<float> translation{};  ///< 相机平移，当前 Webots 端固定为 0。
   };
 
@@ -132,7 +106,7 @@ class WebotsCamera : public LibXR::Application,
    */
   struct MotionSample
   {
-    LibXR::Position<float> angular_velocity{};  ///< 角速度，单位 rad/s。
+    LibXR::Position<float> angular_velocity{};     ///< 角速度，单位 rad/s。
     LibXR::Position<float> linear_acceleration{};  ///< 线加速度，单位 m/s^2。
   };
 
@@ -166,9 +140,6 @@ class WebotsCamera : public LibXR::Application,
     /// 原始 IMU topic domain。实机路径通常是 MCU 域，仿真 detector-only 可改成默认域。
     std::string_view raw_topic_domain_name = "mcu";
 
-    /// 注册到 HardwareContainer 的相机触发 GPIO 名称，必须与 CameraSync 参数一致。
-    std::string_view trigger_gpio_name = "CAMERA";
-
     /// 进入该电平的边沿提交图像；true 表示高有效，false 表示低有效。
     bool trigger_active_level = true;
 
@@ -178,13 +149,12 @@ class WebotsCamera : public LibXR::Application,
 
   /**
    * @brief 构造并启动 Webots 相机采集端。
-   * @param hw libxr 硬件容器，当前模块不额外挂载硬件对象。
-   * @param app 应用管理器。
    * @param runtime 运行时参数。
    */
-  explicit WebotsCamera(LibXR::HardwareContainer& hw, LibXR::ApplicationManager& app,
-                        CameraCalibration calibration, RuntimeParam runtime)
-      : Base(hw, calibration, runtime.device_name, runtime.image_topic_name, runtime.imu_topic_name),
+  explicit WebotsCamera(LibXR::RamFS& external_ramfs, CameraCalibration calibration,
+                        RuntimeParam runtime)
+      : Base(external_ramfs, calibration, runtime.device_name, runtime.image_topic_name,
+             runtime.imu_topic_name),
         target_fps_(runtime.fps),
         exposure_(runtime.exposure),
         gain_(runtime.gain),
@@ -196,13 +166,12 @@ class WebotsCamera : public LibXR::Application,
         gyro_topic_name_(runtime.device_name, "_gyro"),
         accl_topic_name_(runtime.device_name, "_accl"),
         quat_topic_name_(runtime.device_name, "_quat"),
-        trigger_gpio_name_(runtime.trigger_gpio_name),
-        raw_gyro_topic_(LibXR::Topic::FindOrCreate<ImuSample>(
-            gyro_topic_name_.CStr(), &raw_topic_domain_)),
-        raw_accl_topic_(LibXR::Topic::FindOrCreate<ImuSample>(
-            accl_topic_name_.CStr(), &raw_topic_domain_)),
-        raw_quat_topic_(LibXR::Topic::FindOrCreate<QuatSample>(
-            quat_topic_name_.CStr(), &raw_topic_domain_)),
+        raw_gyro_topic_(LibXR::Topic::FindOrCreate<ImuSample>(gyro_topic_name_.CStr(),
+                                                              &raw_topic_domain_)),
+        raw_accl_topic_(LibXR::Topic::FindOrCreate<ImuSample>(accl_topic_name_.CStr(),
+                                                              &raw_topic_domain_)),
+        raw_quat_topic_(LibXR::Topic::FindOrCreate<QuatSample>(quat_topic_name_.CStr(),
+                                                               &raw_topic_domain_)),
         robot_(_libxr_webots_robot_handle),
         trigger_active_level_(runtime.trigger_active_level)
   {
@@ -219,7 +188,7 @@ class WebotsCamera : public LibXR::Application,
       XR_LOG_ERROR("WebotsCamera: runtime names must not be empty");
       throw std::invalid_argument("WebotsCamera: required runtime string is empty");
     }
-    if (runtime.raw_topic_domain_name.empty() || runtime.trigger_gpio_name.empty())
+    if (runtime.raw_topic_domain_name.empty())
     {
       XR_LOG_ERROR("WebotsCamera: runtime sync names must not be empty");
       throw std::invalid_argument("WebotsCamera: sync runtime string is empty");
@@ -229,10 +198,10 @@ class WebotsCamera : public LibXR::Application,
         calibration.native_width != frame_layout.width ||
         calibration.native_height != frame_layout.height)
     {
-      throw std::invalid_argument("WebotsCamera requires a nonzero trigger period and native frame calibration");
+      throw std::invalid_argument(
+          "WebotsCamera requires a nonzero trigger period and native frame calibration");
     }
     profiles_[0] = {ProfileId::WIDE, frame_geometry, runtime.trigger_period_us};
-    hw.Register(LibXR::Entry<LibXR::GPIO>{*this, {trigger_gpio_name_.CStr()}});
 
     InitRobot();
     InitCamera();
@@ -244,21 +213,17 @@ class WebotsCamera : public LibXR::Application,
     StartCaptureThread();
 
     XR_LOG_PASS(
-        "Webots camera enabled: name=%s, capture_period=%d ms, world_dt=%d ms, image_divisor=%d",
+        "Webots camera enabled: name=%s, capture_period=%d ms, world_dt=%d ms, "
+        "image_divisor=%d",
         this->Name(), base_image_interval_steps_ * time_step_ms_, time_step_ms_,
         base_image_interval_steps_);
-
-    app.Register(*this);
   }
 
   /** @brief 请求采集线程退出。 */
-  ~WebotsCamera()
-  {
-    running_.store(false);
-  }
+  ~WebotsCamera() { running_.store(false); }
 
   /** @brief 当前模块无周期监控输出。 */
-  void OnMonitor() override {}
+  void OnMonitor() {}
 
   [[nodiscard]] std::span<const CameraProfile> Profiles() const noexcept override
   {
@@ -292,12 +257,10 @@ class WebotsCamera : public LibXR::Application,
       return;
     }
 
-    uint64_t timestamp_us =
-        current_raw_imu_timestamp_us_.load(std::memory_order_acquire);
+    uint64_t timestamp_us = current_raw_imu_timestamp_us_.load(std::memory_order_acquire);
     if (timestamp_us == 0ULL)
     {
-      timestamp_us =
-          static_cast<uint64_t>(LibXR::Timebase::GetMicroseconds());
+      timestamp_us = static_cast<uint64_t>(LibXR::Timebase::GetMicroseconds());
     }
     pending_trigger_timestamp_us_.store(timestamp_us, std::memory_order_release);
   }
@@ -443,8 +406,8 @@ class WebotsCamera : public LibXR::Application,
   void ConfigureSamplingOnStartup()
   {
     // Camera enable 周期只决定 Webots 渲染负载；真正提交图像由 GPIO 触发边沿决定。
-    base_image_interval_steps_ = ComputePublishIntervalSteps(FpsToPeriodMs(target_fps_),
-                                                             time_step_ms_);
+    base_image_interval_steps_ =
+        ComputePublishIntervalSteps(FpsToPeriodMs(target_fps_), time_step_ms_);
     const int camera_sampling_period_ms = base_image_interval_steps_ * time_step_ms_;
     last_processed_step_ = std::numeric_limits<uint64_t>::max();
     cam_->enable(camera_sampling_period_ms);
@@ -504,10 +467,8 @@ class WebotsCamera : public LibXR::Application,
   {
     // The current Webots IMU mount reports +X as camera-down. Convert it to
     // the public body frame B, where +X roll raises the forward optical ray.
-    const LibXR::Quaternion<float> webots_raw_to_body(
-        0.0f, 0.0f, 0.0f, 1.0f);
-    const LibXR::Quaternion<float> body_to_webots_raw(
-        0.0f, 0.0f, 0.0f, -1.0f);
+    const LibXR::Quaternion<float> webots_raw_to_body(0.0f, 0.0f, 0.0f, 1.0f);
+    const LibXR::Quaternion<float> body_to_webots_raw(0.0f, 0.0f, 0.0f, -1.0f);
     return webots_raw_to_body * sensor * body_to_webots_raw;
   }
 
@@ -517,8 +478,7 @@ class WebotsCamera : public LibXR::Application,
     return LibXR::Position<float>(-vector[0], -vector[1], vector[2]);
   }
 
-  void PublishGimbalQuat(const PoseSample& pose,
-                         LibXR::MicrosecondTimestamp timestamp)
+  void PublishGimbalQuat(const PoseSample& pose, LibXR::MicrosecondTimestamp timestamp)
   {
 #if LIBXR_LOG_LEVEL >= 4
     const LibXR::EulerAngle<float> eulr = pose.rotation.ToEulerAngle();
@@ -535,14 +495,12 @@ class WebotsCamera : public LibXR::Application,
     current_raw_imu_timestamp_us_.store(static_cast<uint64_t>(timestamp),
                                         std::memory_order_release);
 
-    const auto angular_velocity =
-        WebotsRawImuToPublicBodyVector(motion.angular_velocity);
+    const auto angular_velocity = WebotsRawImuToPublicBodyVector(motion.angular_velocity);
     const auto linear_acceleration =
         WebotsRawImuToPublicBodyVector(motion.linear_acceleration);
     const auto rotation = WebotsRawImuToPublicBodyQuat(pose.rotation);
 
-    ImuSample gyro(angular_velocity[0], angular_velocity[1],
-                   angular_velocity[2]);
+    ImuSample gyro(angular_velocity[0], angular_velocity[1], angular_velocity[2]);
     ImuSample accl(linear_acceleration[0], linear_acceleration[1],
                    linear_acceleration[2]);
     QuatSample quat(rotation.w(), rotation.x(), rotation.y(), rotation.z());
@@ -590,10 +548,9 @@ class WebotsCamera : public LibXR::Application,
     }
 
     // 坐标轴由 world 中传感器节点的安装方向保证，这里不做零位补偿。
-    motion.angular_velocity =
-        LibXR::Position<float>(static_cast<float>(angular_velocity[0]),
-                               static_cast<float>(angular_velocity[1]),
-                               static_cast<float>(angular_velocity[2]));
+    motion.angular_velocity = LibXR::Position<float>(
+        static_cast<float>(angular_velocity[0]), static_cast<float>(angular_velocity[1]),
+        static_cast<float>(angular_velocity[2]));
     motion.linear_acceleration =
         LibXR::Position<float>(static_cast<float>(linear_acceleration[0]),
                                static_cast<float>(linear_acceleration[1]),
@@ -603,7 +560,8 @@ class WebotsCamera : public LibXR::Application,
 
   // ---- 帧写入与提交 ----
 
-  bool WriteAndCommitImage(const unsigned char* rgba, LibXR::MicrosecondTimestamp timestamp)
+  bool WriteAndCommitImage(const unsigned char* rgba,
+                           LibXR::MicrosecondTimestamp timestamp)
   {
     ImageFrame* image = this->GetWritableImage();
     if (image == nullptr)
@@ -669,8 +627,8 @@ class WebotsCamera : public LibXR::Application,
       return;
     }
 
-    XR_LOG_INFO("WebotsCamera: %s sample recovered after %d missed steps",
-                sensor_group, fail_count);
+    XR_LOG_INFO("WebotsCamera: %s sample recovered after %d missed steps", sensor_group,
+                fail_count);
     fail_count = 0;
   }
 
@@ -707,15 +665,14 @@ class WebotsCamera : public LibXR::Application,
       return;
     }
 
-    if (!pending_trigger_timestamp_us_.compare_exchange_strong(
-            trigger_timestamp_us, 0ULL, std::memory_order_acq_rel,
-            std::memory_order_acquire))
+    if (!pending_trigger_timestamp_us_.compare_exchange_strong(trigger_timestamp_us, 0ULL,
+                                                               std::memory_order_acq_rel,
+                                                               std::memory_order_acquire))
     {
       return;
     }
 
-    CommitImageSample(
-        static_cast<LibXR::MicrosecondTimestamp>(trigger_timestamp_us));
+    CommitImageSample(static_cast<LibXR::MicrosecondTimestamp>(trigger_timestamp_us));
     ReportRepeatedFailureIfNeeded();
   }
 
@@ -736,16 +693,15 @@ class WebotsCamera : public LibXR::Application,
       LibXR::Thread::Sleep(self->time_step_ms_);
 
       const uint64_t step_us = static_cast<uint64_t>(self->time_step_ms_) * 1000ULL;
-      const auto webots_time_us = static_cast<uint64_t>(
-          std::llround(self->robot_->getTime() * 1000000.0));
+      const auto webots_time_us =
+          static_cast<uint64_t>(std::llround(self->robot_->getTime() * 1000000.0));
       const uint64_t step = webots_time_us / step_us;
       if (!self->EnterNewStep(step))
       {
         continue;
       }
 
-      self->ProcessCaptureStep(
-          static_cast<LibXR::MicrosecondTimestamp>(webots_time_us));
+      self->ProcessCaptureStep(static_cast<LibXR::MicrosecondTimestamp>(webots_time_us));
     }
   }
 
@@ -762,11 +718,9 @@ class WebotsCamera : public LibXR::Application,
   LibXR::RuntimeStringView<> gyro_topic_name_{};
   LibXR::RuntimeStringView<> accl_topic_name_{};
   LibXR::RuntimeStringView<> quat_topic_name_{};
-  LibXR::RuntimeStringView<> trigger_gpio_name_{};
   LibXR::Topic::Domain host_domain_ = LibXR::Topic::Domain("host");
   LibXR::Topic gimbal_quat_topic_ =
-      LibXR::Topic::FindOrCreate<LibXR::Quaternion<float>>("gimbal_quat",
-                                                           &host_domain_);
+      LibXR::Topic::FindOrCreate<LibXR::Quaternion<float>>("gimbal_quat", &host_domain_);
   LibXR::Topic raw_gyro_topic_{};
   LibXR::Topic raw_accl_topic_{};
   LibXR::Topic raw_quat_topic_{};

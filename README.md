@@ -1,5 +1,16 @@
 # WebotsCamera
 
+## Static assembly source line
+
+This source line uses explicit C++ constructor dependencies and ordered instance
+arguments. Inspect the current primary header with `xrobot_mod_parser --path .`;
+its declarations, not old manifest/config examples, define the interface.
+Historical HardwareContainer/ApplicationManager examples below apply only to the
+older dynamic source tags. Device/protocol descriptions remain relevant.
+See the XRobot [migration guide](https://github.com/xrobot-org/XRobot/blob/dev/MIGRATION.md).
+Compilation is not hardware validation; retain version-specific board evidence.
+
+
 WebotsCamera 是 Webots 侧的相机/IMU 传感器端点。模块只负责采集和发布原始传感器数据：IMU 拆成 gyro / accl / quat 三路 topic，相机图像只在触发 GPIO 进入有效电平时提交。
 
 图像触发由 CameraSync 完成；图像与 IMU 的配对由 CameraFrameSync 完成。

@@ -151,9 +151,15 @@ class WebotsCamera : public CameraBase<FrameLayoutV>, public LibXR::GPIO
    * @brief 构造并启动 Webots 相机采集端。
    * @param runtime 运行时参数。
    */
-  explicit WebotsCamera(LibXR::RamFS& external_ramfs, CameraCalibration calibration,
-                        RuntimeParam runtime)
-      : Base(external_ramfs, calibration, runtime.device_name, runtime.image_topic_name,
+  static CameraCalibration DefaultCalibration() { return {.native_width = 1280, .native_height = 720, .camera_matrix = {800.0, 0.0, 640.0, 0.0, 800.0, 360.0, 0.0, 0.0, 1.0}, .distortion_model = CameraTypes::DistortionModel::PLUMB_BOB, .distortion_coefficients = {0.0, 0.0, 0.0, 0.0, 0.0}, .rectification_matrix = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0}, .projection_matrix = {800.0, 0.0, 640.0, 0.0, 0.0, 800.0, 360.0, 0.0, 0.0, 0.0, 1.0, 0.0}}; }
+
+  static RuntimeParam DefaultRuntime() { return {}; }
+
+  explicit WebotsCamera(
+      LibXR::RamFS& ramfs,
+      CameraCalibration calibration = DefaultCalibration(),
+      RuntimeParam runtime = DefaultRuntime())
+      : Base(ramfs, calibration, runtime.device_name, runtime.image_topic_name,
              runtime.imu_topic_name),
         target_fps_(runtime.fps),
         exposure_(runtime.exposure),

@@ -228,9 +228,6 @@ class WebotsCamera : public CameraBase<FrameLayoutV>, public LibXR::GPIO
   /** @brief 请求采集线程退出。 */
   ~WebotsCamera() { running_.store(false); }
 
-  /** @brief 当前模块无周期监控输出。 */
-  void OnMonitor() {}
-
   [[nodiscard]] std::span<const CameraProfile> Profiles() const noexcept override
   {
     return profiles_;

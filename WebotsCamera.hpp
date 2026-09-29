@@ -419,9 +419,14 @@ class WebotsCamera : public CameraBase<FrameLayoutV>, public LibXR::GPIO
   void StartCaptureThread()
   {
     // 采集线程参与 Webots step 栅栏，保证 IMU / image 传感器时间和仿真步一致。
+    // 图像话题的订阅回调（CameraFrameSync、ArmorDetector 预处理等）在本线程同步执行，
+    // 栈与实机相机线程（std::thread 默认 8 MiB）保持一致。
+    // Topic subscribers (CameraFrameSync, ArmorDetector preprocessing) run on this
+    // thread, so it gets the same stack as the hardware camera's std::thread (8 MiB).
+    constexpr size_t capture_stack_bytes = 8U * 1024U * 1024U;
     running_.store(true);
-    capture_thread_.Create<Self*>(this, CaptureThreadMain, "webots_camera", 8192,
-                                  LibXR::Thread::Priority::REALTIME);
+    capture_thread_.Create<Self*>(this, CaptureThreadMain, "webots_camera",
+                                  capture_stack_bytes, LibXR::Thread::Priority::REALTIME);
   }
 
   void ApplyExposure()

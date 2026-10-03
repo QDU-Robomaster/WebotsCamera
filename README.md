@@ -46,10 +46,6 @@ LibXR Webots timebase advances after every simulation step and wakes the capture
 
 When the trigger GPIO enters its active level, the Module records the timestamp of the latest published raw IMU sample as the trigger time (the current LibXR timebase time when no IMU sample exists yet). The first capture step whose time is not earlier than that reads the current Webots image and commits it, with the trigger time as the image timestamp.
 
-```text
-IMU topic -> CameraSync -> GPIO edge -> WebotsCamera CommitImage()
-```
-
 CameraSync schedules the triggers from the microsecond timestamps and `trigger_period_us`, handles the STOP / START commands and publishes the FRAME events; WebotsCamera reacts to the active GPIO edge. CameraFrameSync locks the IMU timeline from the CameraSync acknowledgements and then selects the matching IMU data for each image.
 
 ## 4. 坐标系 / Coordinate Frame

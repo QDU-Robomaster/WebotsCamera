@@ -2,7 +2,7 @@
 
 // clang-format off
 /* === MODULE MANIFEST V2 ===
-module_description: Webots 相机与 IMU 采集端
+module_description: Webots 仿真中的相机与 IMU 传感器端点：发布原始 IMU 数据，并在触发 GPIO 有效时提交图像 / Camera and IMU sensor endpoint in Webots simulation that publishes raw IMU data and commits images when the trigger GPIO becomes active
 depends:
 - id: QDU-Robomaster/CameraBase
   ref: same-or-dev
@@ -49,12 +49,11 @@ extern webots::Robot* _libxr_webots_robot_handle;
  * @details
  * 模块按 Webots step 读取 `Gyro`、`Accelerometer` 和 `InertialUnit`，并把
  * 原始 IMU 样本发布到 `<device_name>_gyro`、`<device_name>_accl`、
- * `<device_name>_quat`。图像不再由本模块按 topic 命令调度，而是把自身注册为
- * `LibXR::GPIO`，由 CameraSync 像真实 MCU 一样翻转触发线；进入有效电平的边沿
- * 才提交一帧图像。
+ * `<device_name>_quat`。模块把自身实现为 `LibXR::GPIO`，由 CameraSync 像真实 MCU
+ * 一样翻转触发线；进入有效电平的边沿提交一帧图像。
  *
- * WebotsCamera 只模拟传感器端点。同步命令、分频拉长、seq 回执和 Host/MCU
- * SharedTopic 边界全部由 CameraSync / CameraFrameSync 负责。
+ * 同步命令、分频拉长、seq 回执和 Host/MCU SharedTopic 边界由
+ * CameraSync / CameraFrameSync 负责。
  */
 template <CameraTypes::FrameLayout FrameLayoutV>
 class WebotsCamera : public CameraBase<FrameLayoutV>, public LibXR::GPIO
@@ -536,7 +535,7 @@ class WebotsCamera : public CameraBase<FrameLayoutV>, public LibXR::GPIO
         static_cast<float>(raw_xyzw[3]), static_cast<float>(raw_xyzw[0]),
         static_cast<float>(raw_xyzw[1]), static_cast<float>(raw_xyzw[2]));
 
-    // WebotsCamera 只发布姿态，平移仍由下游静态外参处理。
+    // 平移固定为 0，由下游静态外参提供。
     pose.translation = LibXR::Position<float>(0.0f, 0.0f, 0.0f);
     return true;
   }
@@ -555,7 +554,7 @@ class WebotsCamera : public CameraBase<FrameLayoutV>, public LibXR::GPIO
       return false;
     }
 
-    // 坐标轴由 world 中传感器节点的安装方向保证，这里不做零位补偿。
+    // 坐标轴由 world 中传感器节点的安装方向决定。
     motion.angular_velocity = LibXR::Position<float>(
         static_cast<float>(angular_velocity[0]), static_cast<float>(angular_velocity[1]),
         static_cast<float>(angular_velocity[2]));

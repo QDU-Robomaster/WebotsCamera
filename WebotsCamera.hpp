@@ -41,19 +41,24 @@ depends:
 extern webots::Robot* _libxr_webots_robot_handle;
 
 /**
- * @class WebotsCamera
  * @brief Webots 仿真环境中的相机与 IMU 数据源。
+ *        Camera and IMU data source in the Webots simulation.
  *
- * @tparam FrameLayoutV 编译期图像存储布局，必须是紧密排列的 BGR8 图像。
+ * @details 按 Webots step 读取 `Gyro`、`Accelerometer` 和 `InertialUnit`，把原始 IMU
+ *          样本发布到 `<device_name>_gyro`、`<device_name>_accl`、`<device_name>_quat`。
+ *          模块实现 `LibXR::GPIO`，由 CameraSync 像真实 MCU 一样翻转触发线，
+ *          进入有效电平的边沿提交一帧图像。同步命令、分频拉长、seq 回执和 Host/MCU
+ *          SharedTopic 边界由 CameraSync 与 CameraFrameSync 负责。
+ *          Reads `Gyro`, `Accelerometer` and `InertialUnit` every Webots step and
+ *          publishes the raw IMU samples to `<device_name>_gyro`, `<device_name>_accl`
+ *          and `<device_name>_quat`. The Module implements `LibXR::GPIO`; CameraSync
+ *          toggles the trigger line like a real MCU, and the edge entering the active
+ *          level commits one image. The synchronization commands, the divider stretching,
+ *          the seq acknowledgements and the Host/MCU SharedTopic boundary are handled by
+ *          CameraSync and CameraFrameSync.
  *
- * @details
- * 模块按 Webots step 读取 `Gyro`、`Accelerometer` 和 `InertialUnit`，并把
- * 原始 IMU 样本发布到 `<device_name>_gyro`、`<device_name>_accl`、
- * `<device_name>_quat`。模块把自身实现为 `LibXR::GPIO`，由 CameraSync 像真实 MCU
- * 一样翻转触发线；进入有效电平的边沿提交一帧图像。
- *
- * 同步命令、分频拉长、seq 回执和 Host/MCU SharedTopic 边界由
- * CameraSync / CameraFrameSync 负责。
+ * @tparam FrameLayoutV 编译期图像存储布局，紧密排列的 BGR8。
+ *                      Image storage layout at compile time, packed BGR8.
  */
 template <CameraTypes::FrameLayout FrameLayoutV>
 class WebotsCamera : public CameraBase<FrameLayoutV>, public LibXR::GPIO
@@ -90,70 +95,95 @@ class WebotsCamera : public CameraBase<FrameLayoutV>, public LibXR::GPIO
                 "WebotsCamera requires packed BGR step");
 
   /**
-   * @struct PoseSample
    * @brief 单个 Webots step 内的姿态样本。
+   *        Attitude sample of one Webots step.
    */
   struct PoseSample
   {
-    LibXR::Quaternion<float> rotation{};   ///< 发布坐标系相对 world 的姿态，wxyz。
-    LibXR::Position<float> translation{};  ///< 相机平移，当前 Webots 端固定为 0。
+    LibXR::Quaternion<float> rotation{};  ///< 发布坐标系相对 world 的姿态，wxyz
+    ///< Attitude of the published frame relative to the world, wxyz
+    LibXR::Position<float> translation{};  ///< 相机平移，固定为 0
+    ///< Camera translation, fixed at 0
   };
 
   /**
-   * @struct MotionSample
    * @brief 单个 Webots step 内的运动样本。
+   *        Motion sample of one Webots step.
    */
   struct MotionSample
   {
-    LibXR::Position<float> angular_velocity{};     ///< 角速度，单位 rad/s。
-    LibXR::Position<float> linear_acceleration{};  ///< 线加速度，单位 m/s^2。
+    LibXR::Position<float> angular_velocity{};  ///< 角速度，单位 rad/s
+    ///< Angular velocity in rad/s
+    LibXR::Position<float> linear_acceleration{};  ///< 线加速度，单位 m/s^2
+    ///< Linear acceleration in m/s^2
   };
 
   /**
-   * @struct RuntimeParam
-   * @brief xrobot YAML 传入的运行时参数。
+   * @brief 运行时参数，由 xrobot YAML 传入。
+   *        Runtime parameters passed from the xrobot YAML.
    */
   struct RuntimeParam
   {
-    /// Webots Camera 设备名，也是原始 IMU topic 前缀。
-    std::string_view device_name = "camera";
-
-    /// 图像目标频率，实际周期量化到 Webots step。
-    int fps = 30;
-
-    /// Webots Camera 曝光值。
-    double exposure = 1.0;
-
-    /// 保留参数；Webots Camera 不支持 gain，非零值会被忽略。
-    double gain = 0.0;
-
-    /// IMU 设备名前缀。
-    std::string_view pose_def_name = "camera";
-
-    /// 原始图像 topic 名。
-    std::string_view image_topic_name = "camera_image";
-
-    /// 同步后 IMU topic 名。
-    std::string_view imu_topic_name = "camera_imu";
-
-    /// 原始 IMU topic domain。实机路径通常是 MCU 域，仿真 detector-only 可改成默认域。
-    std::string_view raw_topic_domain_name = "mcu";
-
-    /// 进入该电平的边沿提交图像；true 表示高有效，false 表示低有效。
-    bool trigger_active_level = true;
-
-    /// 固定 WIDE 档位的触发周期，单位 us；与相机渲染采样频率分别配置。
-    uint32_t trigger_period_us = 20000;
+    std::string_view device_name = "camera";  ///< Camera 设备名与原始 IMU Topic 前缀
+    ///< Webots Camera device name and raw IMU Topic prefix
+    int fps = 30;  ///< 图像采样频率，实际周期量化到 Webots step
+    ///< Image sampling rate, the actual period is quantized to Webots steps
+    double exposure = 1.0;  ///< Webots Camera 曝光值
+    ///< Webots Camera exposure value
+    double gain = 0.0;  ///< 增益；Webots Camera 没有增益控制，非零值记录警告后清零
+    ///< Gain; the Webots Camera has no gain control, a non-zero value logs a warning and
+    ///< is reset to zero
+    std::string_view pose_def_name = "camera";  ///< IMU 设备名前缀
+    ///< IMU device name prefix
+    std::string_view image_topic_name = "camera_image";  ///< 原始图像 Topic 名
+    ///< Raw image Topic name
+    std::string_view imu_topic_name = "camera_imu";  ///< 同步 IMU Topic 名
+    ///< Synchronized IMU Topic name
+    std::string_view raw_topic_domain_name = "mcu";  ///< 原始 IMU Topic 的 domain
+    ///< Domain of the raw IMU Topics; the default domain can be used for in-process
+    ///< debugging
+    bool trigger_active_level = true;  ///< 触发有效电平，进入该电平的边沿提交图像
+    ///< Active trigger level; the edge entering this level commits an image
+    uint32_t trigger_period_us = 20000;  ///< 固定 WIDE 档位的触发周期，单位 us
+    ///< Trigger period of the fixed WIDE profile in us
   };
 
   /**
-   * @brief 构造并启动 Webots 相机采集端。
-   * @param runtime 运行时参数。
+   * @brief 获取默认标定：1280x720、`fx = fy = 800`、主点 (640, 360)、零畸变。
+   *        Get the default calibration: 1280x720, `fx = fy = 800`, principal point (640,
+   *        360), zero distortion.
+   *
+   * @return 默认的原生相机标定。
+   *         The default native camera calibration.
    */
   static CameraCalibration DefaultCalibration() { return {.native_width = 1280, .native_height = 720, .camera_matrix = {800.0, 0.0, 640.0, 0.0, 800.0, 360.0, 0.0, 0.0, 1.0}, .distortion_model = CameraTypes::DistortionModel::PLUMB_BOB, .distortion_coefficients = {0.0, 0.0, 0.0, 0.0, 0.0}, .rectification_matrix = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0}, .projection_matrix = {800.0, 0.0, 640.0, 0.0, 0.0, 800.0, 360.0, 0.0, 0.0, 0.0, 1.0, 0.0}}; }
 
+  /**
+   * @brief 获取默认运行时参数。
+   *        Get the default runtime parameters.
+   *
+   * @return 各项取默认值的运行时参数。
+   *         Runtime parameters with all defaults.
+   */
   static RuntimeParam DefaultRuntime() { return {}; }
 
+  /**
+   * @brief 构造 WebotsCamera：校验参数、绑定 Webots 设备并启动采集线程。
+   *        Construct WebotsCamera: validate the parameters, bind the Webots devices and
+   *        start the capture thread.
+   *
+   * @param ramfs 注册相机命令文件的 RamFS。
+   *              RamFS that registers the camera command file.
+   * @param calibration 原生相机标定，尺寸等于帧布局。
+   *                    Native camera calibration whose size equals the frame layout.
+   * @param runtime 运行时参数。
+   *                Runtime parameters.
+   *
+   * @note 参数不合法时抛出 `std::invalid_argument`；设备缺失或几何不一致时抛出
+   *       `std::runtime_error`。
+   *       Throws `std::invalid_argument` for invalid parameters and `std::runtime_error`
+   *       for missing devices or a geometry mismatch.
+   */
   explicit WebotsCamera(
       LibXR::RamFS& ramfs,
       CameraCalibration calibration = DefaultCalibration(),
@@ -224,14 +254,35 @@ class WebotsCamera : public CameraBase<FrameLayoutV>, public LibXR::GPIO
         base_image_interval_steps_);
   }
 
-  /** @brief 请求采集线程退出。 */
+  /**
+   * @brief 请求采集线程退出。
+   *        Request the capture thread to exit.
+   */
   ~WebotsCamera() { running_.store(false); }
 
+  /**
+   * @brief 获取档位列表，包含一个固定的 WIDE 档位。
+   *        Get the profile list, which holds one fixed WIDE profile.
+   *
+   * @return 档位的只读视图。
+   *         Read-only view of the profiles.
+   */
   [[nodiscard]] std::span<const CameraProfile> Profiles() const noexcept override
   {
     return profiles_;
   }
 
+  /**
+   * @brief 切换档位，仅支持 WIDE。
+   *        Switch the profile; only WIDE is supported.
+   *
+   * @param id 目标档位。
+   *           Target profile.
+   * @param applied 生效的档位与几何。
+   *                Applied profile and geometry.
+   * @return WIDE 为 `ErrorCode::OK`，其他档位为 `ErrorCode::NOT_SUPPORT`。
+   *         `ErrorCode::OK` for WIDE and `ErrorCode::NOT_SUPPORT` for other profiles.
+   */
   LibXR::ErrorCode SwitchProfile(ProfileId id, AppliedProfile& applied) override
   {
     if (id != ProfileId::WIDE)
@@ -242,14 +293,26 @@ class WebotsCamera : public CameraBase<FrameLayoutV>, public LibXR::GPIO
     return LibXR::ErrorCode::OK;
   }
 
-  /** @brief 读取当前仿真触发线电平。 */
+  /**
+   * @brief 读取仿真触发线的电平。
+   *        Read the level of the simulated trigger line.
+   *
+   * @return 当前触发线电平。
+   *         Current trigger line level.
+   */
   bool Read() override { return trigger_level_.load(std::memory_order_relaxed); }
 
   /**
-   * @brief 写入仿真触发线。
+   * @brief 写入仿真触发线；进入有效电平的边沿记录触发时间，之后的采集 step 提交图像。
+   *        Write the simulated trigger line; the edge entering the active level records
+   *        the trigger time, and a following capture step commits the image.
    *
-   * CameraSync 在 MCU 侧 IMU 回调里翻转该 GPIO。这里仅在进入有效电平的边沿提交
-   * 图像，和真实相机触发脚行为一致；同步命令/回执不在本模块处理。
+   * @details CameraSync 在 MCU 侧的 IMU 回调中翻转该 GPIO，行为与真实相机触发脚一致。
+   *          CameraSync toggles this GPIO in the MCU-side IMU callback, matching the
+   *          behavior of a real camera trigger pin.
+   *
+   * @param value 触发线电平。
+   *              Trigger line level.
    */
   void Write(bool value) override
   {
@@ -267,27 +330,61 @@ class WebotsCamera : public CameraBase<FrameLayoutV>, public LibXR::GPIO
     pending_trigger_timestamp_us_.store(timestamp_us, std::memory_order_release);
   }
 
-  /** @brief Webots 仿真 GPIO 不需要真实中断使能。 */
+  /**
+   * @brief 使能中断，Webots 仿真 GPIO 直接返回成功。
+   *        Enable the interrupt; the Webots simulated GPIO returns success directly.
+   *
+   * @return `ErrorCode::OK`。
+   *         `ErrorCode::OK`.
+   */
   LibXR::ErrorCode EnableInterrupt() override { return LibXR::ErrorCode::OK; }
 
-  /** @brief Webots 仿真 GPIO 不需要真实中断禁用。 */
+  /**
+   * @brief 禁用中断，Webots 仿真 GPIO 直接返回成功。
+   *        Disable the interrupt; the Webots simulated GPIO returns success directly.
+   *
+   * @return `ErrorCode::OK`。
+   *         `ErrorCode::OK`.
+   */
   LibXR::ErrorCode DisableInterrupt() override { return LibXR::ErrorCode::OK; }
 
-  /** @brief 保存 GPIO 配置，便于调试时确认 CameraSync 配置过该触发脚。 */
+  /**
+   * @brief 保存 GPIO 配置，用于调试时确认 CameraSync 配置过该触发脚。
+   *        Store the GPIO configuration so that a debug session can confirm that
+   *        CameraSync configured this trigger pin.
+   *
+   * @param config GPIO 配置。
+   *               GPIO configuration.
+   * @return `ErrorCode::OK`。
+   *         `ErrorCode::OK`.
+   */
   LibXR::ErrorCode SetConfig(Configuration config) override
   {
     trigger_gpio_config_ = config;
     return LibXR::ErrorCode::OK;
   }
 
-  /** @brief 更新 Webots Camera 曝光值。 */
+  /**
+   * @brief 更新 Webots Camera 的曝光值。
+   *        Update the Webots Camera exposure.
+   *
+   * @param exposure 曝光值。
+   *                 Exposure value.
+   */
   void SetExposure(double exposure) override
   {
     exposure_ = exposure;
     ApplyExposure();
   }
 
-  /** @brief Webots Camera 不支持 gain；非零值只记录 warning 并清零。 */
+  /**
+   * @brief 设置增益；Webots Camera 没有增益控制，非零值记录警告后清零。
+   *        Set the gain; the Webots Camera has no gain control, so a non-zero value logs
+   *        a warning and is reset to zero.
+   *
+   * @param gain 增益。
+   *             Gain value.
+   */
   void SetGain(double gain) override
   {
     gain_ = gain;

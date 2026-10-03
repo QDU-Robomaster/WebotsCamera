@@ -156,7 +156,17 @@ class WebotsCamera : public CameraBase<FrameLayoutV>, public LibXR::GPIO
    * @return 默认的原生相机标定。
    *         The default native camera calibration.
    */
-  static CameraCalibration DefaultCalibration() { return {.native_width = 1280, .native_height = 720, .camera_matrix = {800.0, 0.0, 640.0, 0.0, 800.0, 360.0, 0.0, 0.0, 1.0}, .distortion_model = CameraTypes::DistortionModel::PLUMB_BOB, .distortion_coefficients = {0.0, 0.0, 0.0, 0.0, 0.0}, .rectification_matrix = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0}, .projection_matrix = {800.0, 0.0, 640.0, 0.0, 0.0, 800.0, 360.0, 0.0, 0.0, 0.0, 1.0, 0.0}}; }
+  static CameraCalibration DefaultCalibration()
+  {
+    return {.native_width = 1280,
+            .native_height = 720,
+            .camera_matrix = {800.0, 0.0, 640.0, 0.0, 800.0, 360.0, 0.0, 0.0, 1.0},
+            .distortion_model = CameraTypes::DistortionModel::PLUMB_BOB,
+            .distortion_coefficients = {0.0, 0.0, 0.0, 0.0, 0.0},
+            .rectification_matrix = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0},
+            .projection_matrix = {800.0, 0.0, 640.0, 0.0, 0.0, 800.0, 360.0, 0.0, 0.0,
+                                  0.0, 1.0, 0.0}};
+  }
 
   /**
    * @brief 获取默认运行时参数。
@@ -184,10 +194,9 @@ class WebotsCamera : public CameraBase<FrameLayoutV>, public LibXR::GPIO
    *       Throws `std::invalid_argument` for invalid parameters and `std::runtime_error`
    *       for missing devices or a geometry mismatch.
    */
-  explicit WebotsCamera(
-      LibXR::RamFS& ramfs,
-      CameraCalibration calibration = DefaultCalibration(),
-      RuntimeParam runtime = DefaultRuntime())
+  explicit WebotsCamera(LibXR::RamFS& ramfs,
+                        CameraCalibration calibration = DefaultCalibration(),
+                        RuntimeParam runtime = DefaultRuntime())
       : Base(ramfs, calibration, runtime.device_name, runtime.image_topic_name,
              runtime.imu_topic_name),
         target_fps_(runtime.fps),

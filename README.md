@@ -149,9 +149,9 @@ With the default configuration the raw IMU Topics are `camera_gyro`, `camera_acc
 
 ## 7. 配置示例 / Configuration Example
 
-`xrobot instance add QDU-Robomaster/WebotsCamera` 写入含空 `template_args` 的实例。`template_args` 填写为 `constexprs` 中定义的帧布局（与 Webots Camera 的实际输出一致），`calibration` 填写为同尺寸的标定，`ramfs` 填写为 BSP 中注册的 RamFS 名称，`runtime` 写成 YAML map，字符串字段写成 C++ 字符串字面量。以下取自 `bsp-webots-autoaim` 的配置：
+`xrobot instance add QDU-Robomaster/WebotsCamera --template-arg <FrameLayout>` 写入的实例：`template_args` 引用 `constexprs` 中定义的帧布局（与 Webots Camera 的实际输出一致），`calibration` 引用同尺寸的标定常量，`ramfs` 填写为 BSP 中用 `XR_REGISTER`（硬件注册）注册的 RamFS 名称，`runtime` 为工具写入的 C++ 表达式 `DefaultRuntime()`，各字段取第 5 节表中的默认值。`runtime` 写成 YAML map 时，键为第 5 节表中的字段名，字符串字段写成 C++ 字符串字面量。
 
-`xrobot instance add QDU-Robomaster/WebotsCamera` writes an instance with an empty `template_args`. `template_args` is set to a frame layout defined in `constexprs` (equal to the actual output of the Webots Camera), `calibration` to a calibration of the same size, `ramfs` to a RamFS name registered by the BSP, and `runtime` is written as a YAML map with string fields as C++ string literals. The following is taken from the `bsp-webots-autoaim` configuration:
+The instance written by `xrobot instance add QDU-Robomaster/WebotsCamera --template-arg <FrameLayout>`: `template_args` refers to a frame layout defined in `constexprs` (equal to the actual output of the Webots Camera), `calibration` refers to a calibration constant of the same size, `ramfs` is set to a RamFS name registered in the BSP with `XR_REGISTER` (Registration), and `runtime` is the C++ expression `DefaultRuntime()` written by the tool, whose fields take the defaults in the table of section 5. When `runtime` is written as a YAML map, the keys are the field names in the table of section 5, and string fields are written as C++ string literals.
 
 ```yaml
 constexpr_namespace: AutoAimRunConfig
@@ -164,12 +164,6 @@ constexprs:
   MainCameraCalibration:
     type: CameraTypes::CameraCalibration
     value: '{.native_width = 800, .native_height = 600, .camera_matrix = {1300.258730617794, 0.0, 400.0, 0.0, 1300.258730617794, 300.0, 0.0, 0.0, 1.0}, .distortion_model = CameraTypes::DistortionModel::PLUMB_BOB, .distortion_coefficients = {0.0, 0.0, 0.0, 0.0, 0.0}, .rectification_matrix = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0}, .projection_matrix = {1300.258730617794, 0.0, 400.0, 0.0, 0.0, 1300.258730617794, 300.0, 0.0, 0.0, 0.0, 1.0, 0.0}}'
-  MainImageTopicName:
-    type: const char*
-    value: "camera_image"
-  MainImuTopicName:
-    type: const char*
-    value: "camera_imu"
 modules:
   - module: QDU-Robomaster/WebotsCamera
     id: WebotsCamera_0
@@ -178,17 +172,7 @@ modules:
     args:
       - ramfs: ramfs
       - calibration: AutoAimRunConfig::MainCameraCalibration
-      - runtime:
-          device_name: "camera"
-          fps: 100
-          exposure: 0.8
-          gain: 0.0
-          pose_def_name: "camera"
-          image_topic_name: AutoAimRunConfig::MainImageTopicName
-          imu_topic_name: AutoAimRunConfig::MainImuTopicName
-          raw_topic_domain_name: "libxr_def_domain"
-          trigger_active_level: true
-          trigger_period_us: 20000
+      - runtime: WebotsCamera<AutoAimRunConfig::MainFrameLayout>::DefaultRuntime()
 ```
 
 CameraSync（`camera_pin`）和 CameraFrameSync（`camera`）的实例以本实例的 id 引用它，列在本实例之后。

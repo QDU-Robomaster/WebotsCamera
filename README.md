@@ -127,23 +127,23 @@ The name fields are non-empty strings; the constructor throws `std::invalid_argu
 
 ## 6. Topic
 
-| Topic | Payload | 时间戳 | 说明 |
-| --- | --- | --- | --- |
-| `<device_name>_gyro` | `Eigen::Matrix<float, 3, 1>` | Topic timestamp | 角速度，单位 rad/s，domain 为 `raw_topic_domain_name` |
-| `<device_name>_accl` | `Eigen::Matrix<float, 3, 1>` | Topic timestamp | 线加速度，单位 m/s^2，domain 为 `raw_topic_domain_name` |
-| `<device_name>_quat` | `LibXR::Quaternion<float>` | Topic timestamp | 姿态四元数，顺序 wxyz，domain 为 `raw_topic_domain_name` |
-| `image_topic_name` | `const CameraBase::SharedFrame*` | `ImageFrame::timestamp_us` | 同步回调期间借用，跨回调使用时复制 `SharedFrame` |
-| `gimbal_quat`（domain `host`） | `LibXR::Quaternion<float>` | Topic timestamp | 与 `<device_name>_quat` 同源的姿态 |
+| Topic | 方向 | 类型 | 时间戳 | 说明 |
+| --- | --- | --- | --- | --- |
+| `<device_name>_gyro` | 发布 | `Eigen::Matrix<float, 3, 1>` | Topic 消息时间戳 | 角速度，单位 rad/s，域为 `raw_topic_domain_name` |
+| `<device_name>_accl` | 发布 | `Eigen::Matrix<float, 3, 1>` | Topic 消息时间戳 | 线加速度，单位 m/s^2，域为 `raw_topic_domain_name` |
+| `<device_name>_quat` | 发布 | `LibXR::Quaternion<float>` | Topic 消息时间戳 | 姿态四元数，顺序 wxyz，域为 `raw_topic_domain_name` |
+| `image_topic_name` | 发布 | `const CameraBase::SharedFrame*` | `ImageFrame::timestamp_us` | 同步回调期间借用，跨回调使用时复制 `SharedFrame` |
+| `gimbal_quat`（域 `host`） | 发布 | `LibXR::Quaternion<float>` | Topic 消息时间戳 | 与 `<device_name>_quat` 同源的姿态 |
 
 默认配置下原始 IMU Topic 为 `camera_gyro`、`camera_accl`、`camera_quat`。
 
-| Topic | Payload | Timestamp | Meaning |
-| --- | --- | --- | --- |
-| `<device_name>_gyro` | `Eigen::Matrix<float, 3, 1>` | Topic timestamp | Angular velocity in rad/s, domain `raw_topic_domain_name` |
-| `<device_name>_accl` | `Eigen::Matrix<float, 3, 1>` | Topic timestamp | Linear acceleration in m/s^2, domain `raw_topic_domain_name` |
-| `<device_name>_quat` | `LibXR::Quaternion<float>` | Topic timestamp | Attitude quaternion in wxyz order, domain `raw_topic_domain_name` |
-| `image_topic_name` | `const CameraBase::SharedFrame*` | `ImageFrame::timestamp_us` | Borrowed during the synchronous callback; the `SharedFrame` is copied when used across callbacks |
-| `gimbal_quat` (domain `host`) | `LibXR::Quaternion<float>` | Topic timestamp | Attitude from the same source as `<device_name>_quat` |
+| Topic | Direction | Type | Timestamp | Meaning |
+| --- | --- | --- | --- | --- |
+| `<device_name>_gyro` | Publish | `Eigen::Matrix<float, 3, 1>` | Topic timestamp | Angular velocity in rad/s, domain `raw_topic_domain_name` |
+| `<device_name>_accl` | Publish | `Eigen::Matrix<float, 3, 1>` | Topic timestamp | Linear acceleration in m/s^2, domain `raw_topic_domain_name` |
+| `<device_name>_quat` | Publish | `LibXR::Quaternion<float>` | Topic timestamp | Attitude quaternion in wxyz order, domain `raw_topic_domain_name` |
+| `image_topic_name` | Publish | `const CameraBase::SharedFrame*` | `ImageFrame::timestamp_us` | Borrowed during the synchronous callback; the `SharedFrame` is copied when used across callbacks |
+| `gimbal_quat` (domain `host`) | Publish | `LibXR::Quaternion<float>` | Topic timestamp | Attitude from the same source as `<device_name>_quat` |
 
 With the default configuration the raw IMU Topics are `camera_gyro`, `camera_accl` and `camera_quat`.
 

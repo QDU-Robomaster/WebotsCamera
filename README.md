@@ -23,9 +23,9 @@ The robot (Robot node) name must differ from the camera name, otherwise Webots d
 
 ## 3. 成像 / Imaging
 
-`WebotsBayer::Render` 从原生 BGRA 图取窗并抽样：WIDE 与真车相同，每个 4×4 原生块取左上 2×2，帧像素 x 对应原生 `80 + 4·⌊x/2⌋ + x mod 2`；NARROW 为 1:1 裁剪。帧像素的颜色按 RGGB 由坐标奇偶决定。`ApplyView` 只改软件取窗，立即生效。
+`WebotsBayer::Render` 从原生 BGRA 图取窗并抽样：WIDE 与真车相同，每个 4×4 原生块取左上 2×2，帧像素 x 对应原生 `80 + 4·⌊x/2⌋ + x mod 2`；NARROW 为 1:1 裁剪。帧像素的颜色按 RGGB 由坐标奇偶决定。`ApplyView` 与 `ApplyOffset` 只改软件取窗，立即生效；每帧带渲染时的窗口。
 
-`WebotsBayer::Render` windows and samples the native BGRA image: WIDE matches the robot camera, keeping the top-left 2×2 of every 4×4 native block, so frame pixel x maps to native `80 + 4·⌊x/2⌋ + x mod 2`; NARROW is a 1:1 crop. Each frame pixel's colour follows the RGGB pattern by coordinate parity. `ApplyView` changes only the software window and takes effect at once.
+`WebotsBayer::Render` windows and samples the native BGRA image: WIDE matches the robot camera, keeping the top-left 2×2 of every 4×4 native block, so frame pixel x maps to native `80 + 4·⌊x/2⌋ + x mod 2`; NARROW is a 1:1 crop. Each frame pixel's colour follows the RGGB pattern by coordinate parity. `ApplyView` and `ApplyOffset` change only the software window and take effect at once; each frame carries the window it was rendered with.
 
 相机只在触发时渲染：触发电平的上升沿之后的第一个仿真步打开 Webots Camera，下一步取图、抽样并关闭相机。帧时间为取图时的仿真时间，比边沿晚一个仿真步，CameraFrameSync 的同步偏移按此配置。帧计数每个边沿加一，切档后从 0 起；切档前边沿的帧被丢弃。
 

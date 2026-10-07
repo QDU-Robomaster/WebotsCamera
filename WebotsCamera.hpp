@@ -192,6 +192,15 @@ class WebotsCamera : public CameraBase, public LibXR::GPIO
     return LibXR::ErrorCode::OK;
   }
 
+  /// 只改软件取窗，立即生效；之后渲染的帧带新窗口 / Changes only the software window,
+  /// effective at once; frames rendered afterwards carry the new window.
+  LibXR::ErrorCode ApplyOffset(const CameraTypes::FrameGeometry& geometry) override
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    window_ = geometry;
+    return LibXR::ErrorCode::OK;
+  }
+
   static void StepThread(WebotsCamera* self)
   {
     uint64_t last_step = UINT64_MAX;

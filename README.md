@@ -1,198 +1,78 @@
 # WebotsCamera
 
-Webots 仿真中的相机与 IMU 传感器端点：发布原始 IMU 数据，并在触发 GPIO 有效时提交图像 / Camera and IMU sensor endpoint in Webots simulation that publishes raw IMU data and commits images when the trigger GPIO becomes active
+Webots 仿真相机：按真车几何输出 BayerRG8，发布 IMU，并作为触发 GPIO / Webots camera that outputs BayerRG8 in the robot camera geometry, publishes the IMU and acts as the trigger GPIO
 
 ## 1. 模块作用 / Purpose
 
-WebotsCamera 是 Webots 侧的相机与 IMU 传感器端点。每个 Webots step 发布一组原始 IMU 样本，IMU 拆成 gyro / accl / quat 三路 Topic；相机图像在触发 GPIO 进入有效电平时提交。模块自身实现 `LibXR::GPIO`，作为相机触发线交给 CameraSync，CameraSync 写该 GPIO 后图像才被提交。图像触发由 CameraSync 完成，图像与 IMU 的配对由 CameraFrameSync 完成。
+WebotsCamera 是 CameraBase 在 Webots 里的驱动。世界里的相机按真车传感器的原生分辨率 1440×1080 渲染，每帧在软件里按当前视角取窗、抽样成 640×512 BayerRG8，所以检测器、跟踪器在仿真里看到的帧与真车的帧几何相同，两档视角都能仿真。它同时承担仿真里 MCU 的两项工作：每个仿真步发布 IMU，并作为 CameraSync 写触发电平的 GPIO。
 
-- `fps` 控制 Webots Camera 底层的渲染采样周期，实际图像提交由 CameraSync 的微秒触发周期决定。
-- 图像写入 `CameraBase::ImageFrame`，像素格式为紧密排列的 BGR8（Webots BGRA 转 BGR）；每帧携带原生几何，通过 `SharedFrame` 保持所有权。
-- 采集线程 `webots_camera`（实时优先级）随 LibXR Webots timebase 唤醒，原始采样时间戳取 `robot->getTime()` 的仿真时间。
-- STOP / START / FRAME 协议、序列号、触发回执和图像与 IMU 的同步由 CameraSync 和 CameraFrameSync 处理。
-- CameraBase 以 `device_name` 为名创建 RamFS 命令文件：`set_exposure <值>` 设置 Webots Camera 的曝光；`set_gain <值>` 记录警告，增益保持 0（Webots Camera 没有增益控制）。
+WebotsCamera is the CameraBase driver in Webots. The world camera renders at the robot sensor's native 1440×1080; each frame is windowed for the current view and sampled into 640×512 BayerRG8 in software, so the detector and tracker see frames with the robot's geometry and both views can be simulated. It also plays two MCU roles in simulation: it publishes the IMU every simulation step and is the GPIO that CameraSync drives for the trigger.
 
-WebotsCamera is the camera and IMU sensor endpoint on the Webots side. In every Webots step it publishes one raw IMU sample, split into the three Topics gyro / accl / quat; a camera image is committed when the trigger GPIO enters its active level. The Module implements `LibXR::GPIO` itself and hands it to CameraSync as the camera trigger line; an image is committed after CameraSync writes this GPIO. CameraSync performs the image triggering, and CameraFrameSync pairs the images with the IMU data.
+## 2. 世界文件 / World File
 
-- `fps` controls the underlying rendering sampling period of the Webots Camera; the actual image commit is determined by the microsecond trigger period of CameraSync.
-- Images are written into `CameraBase::ImageFrame` in packed BGR8 (Webots BGRA converted to BGR); every frame carries its native geometry and keeps ownership through `SharedFrame`.
-- The capture thread `webots_camera` (real-time priority) wakes with the LibXR Webots timebase, and the raw sample timestamp is the simulation time of `robot->getTime()`.
-- The STOP / START / FRAME protocol, the sequence numbers, the trigger acknowledgements and the image and IMU synchronization are handled by CameraSync and CameraFrameSync.
-- CameraBase creates a RamFS command file named after `device_name`: `set_exposure <value>` sets the Webots Camera exposure; `set_gain <value>` logs a warning and the gain stays 0 (the Webots Camera has no gain control).
-
-## 2. 类型与档位 / Types and Profiles
-
-模板参数 `FrameLayoutV` 为 `CameraTypes::FrameLayout`，是紧密排列的 BGR8（`step == width * 3`，编译期检查）。启动时检查 Webots Camera 的实际宽高与布局一致，不一致时抛出异常。
-
-标定通过构造参数 `calibration` 传入，原生标定尺寸等于帧布局。模块提供一个固定的 WIDE 档位，几何为原生尺寸、ROI 偏移 0、decimation 1。`Profiles()` 返回稳定的只读视图；`SwitchProfile(WIDE, applied)` 返回该档位，其他档位返回 `NOT_SUPPORT`。
-
-The template parameter `FrameLayoutV` is a `CameraTypes::FrameLayout` with packed BGR8 (`step == width * 3`, checked at compile time). At startup the actual width and height of the Webots Camera are checked against the layout, and an exception is thrown on a mismatch.
-
-The calibration is passed through the constructor parameter `calibration`, and its native size equals the frame layout. The Module provides one fixed WIDE profile with the native size, ROI offset 0 and decimation 1. `Profiles()` returns a stable read-only view; `SwitchProfile(WIDE, applied)` returns that profile and other profiles return `NOT_SUPPORT`.
-
-## 3. 时间与触发同步 / Timing and Trigger Synchronization
-
-LibXR Webots timebase 在每次仿真 step 后推进并唤醒采集线程。WebotsCamera 把 `robot->getTime()` 换算为微秒，用于 step 去重和原始 IMU 样本的时间戳。
-
-触发 GPIO 进入有效电平时，模块记下最近一次发布的原始 IMU 时间戳作为触发时间（尚无 IMU 样本时取 LibXR timebase 当前时间）。之后第一个时间不早于它的采集 step 读取当前 Webots 图像并提交，图像时间戳为触发时间。
-
-```text
-IMU topic -> CameraSync -> GPIO edge -> WebotsCamera CommitImage()
-```
-
-CameraSync 根据微秒时间戳和 `trigger_period_us` 调度触发，处理 STOP / START 命令并发布 FRAME 事件；WebotsCamera 响应 GPIO 的有效边沿。CameraFrameSync 根据 CameraSync 回执锁定 IMU 时间轴，再为图像选择对应的 IMU。
-
-LibXR Webots timebase advances after every simulation step and wakes the capture thread. WebotsCamera converts `robot->getTime()` to microseconds for step de-duplication and the raw IMU sample timestamps.
-
-When the trigger GPIO enters its active level, the Module records the timestamp of the latest published raw IMU sample as the trigger time (the current LibXR timebase time when no IMU sample exists yet). The first capture step whose time is not earlier than that reads the current Webots image and commits it, with the trigger time as the image timestamp.
-
-CameraSync schedules the triggers from the microsecond timestamps and `trigger_period_us`, handles the STOP / START commands and publishes the FRAME events; WebotsCamera reacts to the active GPIO edge. CameraFrameSync locks the IMU timeline from the CameraSync acknowledgements and then selects the matching IMU data for each image.
-
-## 4. 坐标系 / Coordinate Frame
-
-模块对外发布的公开本体系 `B` 为右手系：`x` 向右，`y` 向前，`z` 向上。`<device_name>_quat`、`<device_name>_gyro`、`<device_name>_accl` 和 `host` 域的 `gimbal_quat` 使用这套坐标系，角速度正方向遵循各轴右手定则。
-
-Webots world 中 IMU 的安装零位使原始 `+X` roll 对应相机低头，与公开 `B` 系的“`+X` roll 抬头”相反，yaw 轴同号。因此模块在发布 Topic 之前做固定的传感器安装变换：向量取 `diag(-1, -1, 1)`，姿态四元数按同一变换（绕 `z` 轴 180°）换基。该变换属于 Webots 传感器适配层，下游模块（如 ArmorTracker）直接使用公开 `B` 系数据。
-
-The public body frame `B` published by the Module is right-handed: `x` points right, `y` forward and `z` up. `<device_name>_quat`, `<device_name>_gyro`, `<device_name>_accl` and the `gimbal_quat` of the `host` domain use this frame, and the positive angular velocity direction follows the right-hand rule of each axis.
-
-The IMU mounting zero of the Webots world makes the raw `+X` roll correspond to the camera pitching down, opposite to the "`+X` roll pitches up" of the public `B` frame, with the same sign on the yaw axis. The Module therefore applies a fixed sensor mounting transform before publishing: vectors use `diag(-1, -1, 1)` and the attitude quaternion changes basis with the same transform (a 180° rotation about the `z` axis). The transform belongs to the Webots sensor adaptation layer, and downstream Modules (such as ArmorTracker) use the public `B` frame data directly.
-
-## 5. 构造接口 / Constructor
-
-```cpp
-template <CameraTypes::FrameLayout FrameLayoutV>
-class WebotsCamera : public CameraBase<FrameLayoutV>, public LibXR::GPIO;
-
-explicit WebotsCamera(LibXR::RamFS& ramfs,
-                      CameraCalibration calibration = DefaultCalibration(),
-                      RuntimeParam runtime = DefaultRuntime());
-```
-
-模板参数：
-
-- `FrameLayoutV`：图像布局，紧密排列的 BGR8，与 Webots Camera 分辨率一致。
-
-依赖：
-
-- `ramfs`：`LibXR::RamFS`，注册相机命令文件，取自 BSP 的硬件注册（`XR_REGISTER`）。
-
-配置参数：
-
-- `calibration`：原生标定 `CameraTypes::CameraCalibration`，尺寸等于帧布局。默认 `DefaultCalibration()` 为 1280x720、`fx = fy = 800`、主点 `(640, 360)`、`PLUMB_BOB` 零畸变。
-- `runtime`（`RuntimeParam`）：
-
-| 参数 | 默认值 | 说明 |
+| 设备 / Device | 名字 / Name | 要求 / Requirement |
 | --- | --- | --- |
-| `device_name` | `"camera"` | Webots Camera 设备名、原始 IMU Topic 前缀和 RamFS 命令文件名 |
-| `fps` | `30` | 底层渲染采样频率，量化为整数个 Webots step，取正值 |
-| `exposure` | `1.0` | Webots Camera 曝光值 |
-| `gain` | `0.0` | 增益；Webots Camera 没有增益控制，非零值记录警告后清零 |
-| `pose_def_name` | `"camera"` | IMU 设备名前缀 |
-| `image_topic_name` | `"camera_image"` | 原始图像 Topic 名 |
-| `imu_topic_name` | `"camera_imu"` | 同步 IMU Topic 名，传给 CameraBase |
-| `raw_topic_domain_name` | `"mcu"` | 原始 IMU Topic 的 domain；进程内调试可改为默认域 `"libxr_def_domain"` |
-| `trigger_active_level` | `true` | 触发有效电平，进入该电平的边沿提交图像 |
-| `trigger_period_us` | `20000` | 固定 WIDE 档位声明的触发周期，单位 us，与 CameraSync 配置相同，取非零值 |
+| Camera | `<name>` | `width 1440`、`height 1080`，`fieldOfView` 与标定焦距一致 |
+| Gyro | `<name>_gyro` | — |
+| Accelerometer | `<name>_accelerometer` | — |
+| InertialUnit | `<name>_inertial_unit` | — |
 
-名称字段取非空字符串；参数不合法时构造抛出 `std::invalid_argument`。
+机器人（Robot 节点）的名字不能与相机名相同，否则 Webots 找不到相机设备。启动时核对世界里的相机与标定：分辨率相同，`fx`、`fy` 与 `(width / 2) / tan(fieldOfView / 2)` 相差不超过 0.5%，主点距图像中心不超过 1 像素；不一致即致命退出。Webots 的 Lens 畸变不能从控制器读出，标定里的畸变系数须由世界文件的 Lens 参数拟合得到，Lens `center` 保持 `0.5 0.5`。
 
-Template parameter:
+The robot (Robot node) name must differ from the camera name, otherwise Webots does not find the camera device. At start-up the world camera is checked against the calibration: same resolution, `fx` and `fy` within 0.5% of `(width / 2) / tan(fieldOfView / 2)`, principal point within 1 px of the image centre; a mismatch is fatal. The Webots Lens distortion cannot be read by the controller, so the calibration's distortion coefficients are fitted from the world's Lens parameters, with the Lens `center` kept at `0.5 0.5`.
 
-- `FrameLayoutV`: the image layout, packed BGR8, equal to the Webots Camera resolution.
+## 3. 成像 / Imaging
 
-Dependencies:
+`WebotsBayer::Render` 从原生 BGRA 图取窗并抽样：WIDE 与真车相同，每个 4×4 原生块取左上 2×2，帧像素 x 对应原生 `80 + 4·⌊x/2⌋ + x mod 2`；NARROW 为 1:1 裁剪。帧像素的颜色按 RGGB 由坐标奇偶决定。`ApplyView` 与 `ApplyOffset` 只改软件取窗，立即生效；每帧带渲染时的窗口。
 
-- `ramfs`: the `LibXR::RamFS` that registers the camera command file, taken from the BSP's Registration (`XR_REGISTER`).
+`WebotsBayer::Render` windows and samples the native BGRA image: WIDE matches the robot camera, keeping the top-left 2×2 of every 4×4 native block, so frame pixel x maps to native `80 + 4·⌊x/2⌋ + x mod 2`; NARROW is a 1:1 crop. Each frame pixel's colour follows the RGGB pattern by coordinate parity. `ApplyView` and `ApplyOffset` change only the software window and take effect at once; each frame carries the window it was rendered with.
 
-Configuration parameters:
+相机只在触发时渲染：触发电平的上升沿之后的第一个仿真步打开 Webots Camera，下一步取图、抽样并关闭相机。帧时间为取图时的仿真时间，比边沿晚一个仿真步，CameraFrameSync 的同步偏移按此配置。帧计数每个边沿加一，切档后从 0 起；切档前边沿的帧被丢弃。
 
-- `calibration`: native calibration `CameraTypes::CameraCalibration` whose size equals the frame layout. The default `DefaultCalibration()` is 1280x720, `fx = fy = 800`, principal point `(640, 360)` and zero `PLUMB_BOB` distortion.
-- `runtime` (`RuntimeParam`):
+The camera renders only on demand: on the first simulation step after a rising edge of the trigger level the Webots Camera is enabled, and on the next step the image is read, sampled and the camera disabled. The frame time is the simulation time of the read, one step after the edge; CameraFrameSync's sync offset is configured accordingly. The frame counter advances per edge and restarts at 0 after a view switch; a frame of an edge before the switch is dropped.
 
-| Parameter | Default | Meaning |
-| --- | --- | --- |
-| `device_name` | `"camera"` | Webots Camera device name, raw IMU Topic prefix and RamFS command file name |
-| `fps` | `30` | Underlying rendering sampling rate, quantized to a whole number of Webots steps, positive |
-| `exposure` | `1.0` | Webots Camera exposure value |
-| `gain` | `0.0` | Gain; the Webots Camera has no gain control, and a non-zero value logs a warning and is reset to zero |
-| `pose_def_name` | `"camera"` | IMU device name prefix |
-| `image_topic_name` | `"camera_image"` | Raw image Topic name |
-| `imu_topic_name` | `"camera_imu"` | Synchronized IMU Topic name, passed to CameraBase |
-| `raw_topic_domain_name` | `"mcu"` | Domain of the raw IMU Topics; `"libxr_def_domain"` can be used for in-process debugging |
-| `trigger_active_level` | `true` | Active trigger level; the edge entering this level commits an image |
-| `trigger_period_us` | `20000` | Trigger period declared by the fixed WIDE profile in us, equal to the CameraSync setting, non-zero |
+## 4. IMU 与线程 / IMU and Threads
 
-The name fields are non-empty strings; the constructor throws `std::invalid_argument` for invalid parameters.
+每个仿真步读 Gyro、Accelerometer、InertialUnit，转成公共机体系（x 右、y 前、z 上，即 Webots 传感器系绕 z 轴转 180°）后，以仿真时间为 Topic 时间戳，发布到配置的三个 IMU Topic。Topic 名与 CameraFrameSync 配置的 MCU IMU Topic 名相同，载荷与 MCU 相同：角速度、加速度为 `Eigen::Matrix<float, 3, 1>`，姿态为 `LibXR::Quaternion<float>`。
 
-## 6. Topic
+Every simulation step the Gyro, Accelerometer and InertialUnit are read, turned into the body frame (x right, y forward, z up, i.e. the Webots sensor frame turned 180° about z) and published with the simulation time as Topic timestamp on the three configured IMU Topics. The Topic names are the MCU IMU Topic names configured in CameraFrameSync, with the MCU payloads: `Eigen::Matrix<float, 3, 1>` for angular velocity and acceleration, `LibXR::Quaternion<float>` for the attitude.
 
-| Topic | 方向 | 类型 | 时间戳 | 说明 |
-| --- | --- | --- | --- | --- |
-| `<device_name>_gyro` | 发布 | `Eigen::Matrix<float, 3, 1>` | Topic 消息时间戳 | 角速度，单位 rad/s，域为 `raw_topic_domain_name` |
-| `<device_name>_accl` | 发布 | `Eigen::Matrix<float, 3, 1>` | Topic 消息时间戳 | 线加速度，单位 m/s^2，域为 `raw_topic_domain_name` |
-| `<device_name>_quat` | 发布 | `LibXR::Quaternion<float>` | Topic 消息时间戳 | 姿态四元数，顺序 wxyz，域为 `raw_topic_domain_name` |
-| `image_topic_name` | 发布 | `const CameraBase::SharedFrame*` | `ImageFrame::timestamp_us` | 同步回调期间借用，跨回调使用时复制 `SharedFrame` |
-| `gimbal_quat`（域 `host`） | 发布 | `LibXR::Quaternion<float>` | Topic 消息时间戳 | 与 `<device_name>_quat` 同源的姿态 |
+Webots API 只在模块自己的步进线程里调用，该线程是 LibXR 的 REALTIME 线程，与仿真步锁步运行。CameraBase 的采集线程只从步进线程交出的缓冲里取帧。
 
-默认配置下原始 IMU Topic 为 `camera_gyro`、`camera_accl`、`camera_quat`。
+The Webots API is called only on the Module's own step thread, a LibXR REALTIME thread that runs in lockstep with the simulation. CameraBase's capture thread only takes frames from the buffer the step thread hands over.
 
-| Topic | Direction | Type | Timestamp | Meaning |
-| --- | --- | --- | --- | --- |
-| `<device_name>_gyro` | Publish | `Eigen::Matrix<float, 3, 1>` | Topic timestamp | Angular velocity in rad/s, domain `raw_topic_domain_name` |
-| `<device_name>_accl` | Publish | `Eigen::Matrix<float, 3, 1>` | Topic timestamp | Linear acceleration in m/s^2, domain `raw_topic_domain_name` |
-| `<device_name>_quat` | Publish | `LibXR::Quaternion<float>` | Topic timestamp | Attitude quaternion in wxyz order, domain `raw_topic_domain_name` |
-| `image_topic_name` | Publish | `const CameraBase::SharedFrame*` | `ImageFrame::timestamp_us` | Borrowed during the synchronous callback; the `SharedFrame` is copied when used across callbacks |
-| `gimbal_quat` (domain `host`) | Publish | `LibXR::Quaternion<float>` | Topic timestamp | Attitude from the same source as `<device_name>_quat` |
-
-With the default configuration the raw IMU Topics are `camera_gyro`, `camera_accl` and `camera_quat`.
-
-## 7. 配置示例 / Configuration Example
-
-`xrobot instance add QDU-Robomaster/WebotsCamera --template-arg <FrameLayout>` 写入的实例：`template_args` 引用 `constexprs` 中定义的帧布局（与 Webots Camera 的实际输出一致），`calibration` 引用同尺寸的标定常量，`ramfs` 填写为 BSP 中用 `XR_REGISTER`（硬件注册）注册的 RamFS 名称，`runtime` 为工具写入的 C++ 表达式 `DefaultRuntime()`，各字段取第 5 节表中的默认值。`runtime` 写成 YAML map 时，键为第 5 节表中的字段名，字符串字段写成 C++ 字符串字面量。
-
-The instance written by `xrobot instance add QDU-Robomaster/WebotsCamera --template-arg <FrameLayout>`: `template_args` refers to a frame layout defined in `constexprs` (equal to the actual output of the Webots Camera), `calibration` refers to a calibration constant of the same size, `ramfs` is set to a RamFS name registered in the BSP with `XR_REGISTER` (Registration), and `runtime` is the C++ expression `DefaultRuntime()` written by the tool, whose fields take the defaults in the table of section 5. When `runtime` is written as a YAML map, the keys are the field names in the table of section 5, and string fields are written as C++ string literals.
+## 5. 配置示例 / Configuration Example
 
 ```yaml
-constexpr_namespace: AutoAimRunConfig
-constexpr_includes:
-  - CameraBase.hpp
-constexprs:
-  MainFrameLayout:
-    type: CameraTypes::FrameLayout
-    value: '{.width = 800, .height = 600, .step = 2400, .encoding = CameraTypes::Encoding::BGR8}'
-  MainCameraCalibration:
-    type: CameraTypes::CameraCalibration
-    value: '{.native_width = 800, .native_height = 600, .camera_matrix = {1300.258730617794, 0.0, 400.0, 0.0, 1300.258730617794, 300.0, 0.0, 0.0, 1.0}, .distortion_model = CameraTypes::DistortionModel::PLUMB_BOB, .distortion_coefficients = {0.0, 0.0, 0.0, 0.0, 0.0}, .rectification_matrix = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0}, .projection_matrix = {1300.258730617794, 0.0, 400.0, 0.0, 0.0, 1300.258730617794, 300.0, 0.0, 0.0, 0.0, 1.0, 0.0}}'
 modules:
   - module: QDU-Robomaster/WebotsCamera
-    id: WebotsCamera_0
-    template_args:
-      - AutoAimRunConfig::MainFrameLayout
+    id: camera
     args:
-      - ramfs: ramfs
-      - calibration: AutoAimRunConfig::MainCameraCalibration
-      - runtime: WebotsCamera<AutoAimRunConfig::MainFrameLayout>::DefaultRuntime()
+      - calibration: AutoAimRunConfig::SimCameraCalibration
+      - narrow: {u: 0.5, v: 0.5}
+      - name: "gimbal"
+      - settings:
+          exposure: 1.0
+          gyro_topic: "gimbal_gyro"
+          accl_topic: "gimbal_accl"
+          quat_topic: "gimbal_quat"
+  - module: QDU-Robomaster/CameraSync
+    id: camera_sync
+    args:
+      - camera_pin: camera
+      # ...
 ```
 
-CameraSync（`camera_pin`）和 CameraFrameSync（`camera`）的实例以本实例的 id 引用它，列在本实例之后。
+## 6. 测试 / Tests
 
-The CameraSync (`camera_pin`) and CameraFrameSync (`camera`) instances reference this instance by its id and are listed after it.
+- `tests/webots_bayer_test.cpp`：取窗与抽样的原生像素、通道与 CameraTypes 映射一致（WIDE、NARROW、窗口位于角落）。
+- `tests/webots_camera_link_test.cpp`：在 LibXR 的 webots 系统下编译链接整个驱动。
 
-## 8. 依赖与硬件 / Dependencies and Hardware
+- `tests/webots_bayer_test.cpp`: the sampled native pixels and channels agree with the CameraTypes mapping (WIDE, NARROW, a corner window).
+- `tests/webots_camera_link_test.cpp`: compiles and links the whole driver on the LibXR webots system.
 
-依赖：
+## 7. 依赖 / Dependencies
 
-- `QDU-Robomaster/CameraBase`：相机基类、帧布局与共享图像所有权。
-- OpenCV 4（`core`、`imgproc`，用于 BGRA 到 BGR 的转换）、Webots C++ API、Eigen。
-- LibXR，构建时使用 LibXR 的 Webots 后端（`-DLIBXR_SYSTEM=webots -DLIBXR_DRIVER=webots`），模块通过该后端提供的 `_libxr_webots_robot_handle` 访问 Webots `Robot`。
+CameraBase、LibXR（webots 系统）、Webots R2025a 控制器库。
 
-Webots 设备：world 中名为 `device_name` 的 Camera。当 `pose_def_name = camera` 时还需要 `camera_gyro`、`camera_accelerometer` 和 `camera_inertial_unit`，三类 IMU 设备同刚体安装，缺少任一设备时构造抛出异常。姿态来自 `InertialUnit::getQuaternion()`，Webots 返回的 xyzw 在模块内转换为 wxyz。
-
-Dependencies:
-
-- `QDU-Robomaster/CameraBase`: camera base class, frame layout and shared image ownership.
-- OpenCV 4 (`core`, `imgproc`, used for the BGRA to BGR conversion), the Webots C++ API and Eigen.
-- LibXR, built with the LibXR Webots backend (`-DLIBXR_SYSTEM=webots -DLIBXR_DRIVER=webots`); the Module reaches the Webots `Robot` through the `_libxr_webots_robot_handle` provided by that backend.
-
-Webots devices: a Camera named `device_name` in the world. With `pose_def_name = camera`, `camera_gyro`, `camera_accelerometer` and `camera_inertial_unit` are also required; the three IMU devices are mounted on the same rigid body, and the constructor throws an exception when any of them is missing. The attitude comes from `InertialUnit::getQuaternion()`, and the xyzw returned by Webots is converted to wxyz inside the Module.
+CameraBase, LibXR (webots system), the Webots R2025a controller libraries.
